@@ -15,7 +15,7 @@ done
 
 hook_get_version()
 {
-	local file="$1/awlsim/version.py"
+	local file="$1/awlsim/core/version.py"
 	local maj="$(cat "$file" | grep -e VERSION_MAJOR | head -n1 | awk '{print $3;}')"
 	local min="$(cat "$file" | grep -e VERSION_MINOR | head -n1 | awk '{print $3;}')"
 	version="$maj.$min"
@@ -62,5 +62,5 @@ hook_regression_tests()
 [ -z "$NOCYTHON" ] && export NOCYTHON=1
 
 project=awlsim
-default_compress=zip
+default_archives=py-sdist,py-bdist-wininst
 makerelease "$@"

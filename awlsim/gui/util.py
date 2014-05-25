@@ -19,21 +19,22 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 
-import sys
-from awlsim import *
+from __future__ import division, absolute_import, print_function, unicode_literals
+from awlsim.core.compat import *
 
-if isPyPy:
-	# PySide does not work on PyPy, yet.
-	printError("Running awlsimgui on the PyPy interpreter is not supported.")
+import sys
+from awlsim.core import *
+import awlsim.cython_helper
+
+if isPyPy or isJython:
+	# PySide does not work on PyPy or Jython, yet.
+	printError("Running awlsimgui on the PyPy or Jython interpreter is not supported.")
 	printError("Please use CPython 2.7 or CPython 3.x")
 	sys.exit(1)
 
-if awlsim_useCython:
+if awlsim.cython_helper.shouldUseCython():
 	print("*** Using accelerated CYTHON core "
 	      "(AWLSIMCYTHON environment variable is set)")
-
-if isPy2Compat:
-	input = raw_input
 
 try:
 	from PySide.QtCore import *

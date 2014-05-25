@@ -19,6 +19,9 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 
+from __future__ import division, absolute_import, print_function, unicode_literals
+from awlsim.core.compat import *
+
 from awlsim.gui.util import *
 from awlsim.gui.cpuwidget import *
 
@@ -189,7 +192,7 @@ class EditWidget(QPlainTextEdit):
 		# Update the stats widget
 		if self.__cpuStatsCount >= self.__cpuStatsUpdate:
 			self.__cpuStatsCount = 0
-			self.__cpuStatsUpdate = cpu.getRandomInt(0, 255) + 1
+			self.__cpuStatsUpdate = 128
 			self.cpuStatsWidget.update()
 
 	def updateCpuStats_afterCycle(self, cpu):

@@ -19,6 +19,9 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 
+from __future__ import division, absolute_import, print_function, unicode_literals
+from awlsim.core.compat import *
+
 from awlsim.gui.util import *
 from awlsim.gui.pseudohardware import *
 from awlsim.gui.cpustate import *
@@ -27,13 +30,13 @@ from awlsim.gui.cpustate import *
 class CpuWidget(QWidget):
 	runStateChanged = Signal(int)
 
-	enum.start
-	STATE_STOP	= enum.item
-	STATE_PARSE	= enum.item
-	STATE_INIT	= enum.item
-	STATE_LOAD	= enum.item
-	STATE_RUN	= enum.item
-	enum.end
+	EnumGen.start
+	STATE_STOP	= EnumGen.item
+	STATE_PARSE	= EnumGen.item
+	STATE_INIT	= EnumGen.item
+	STATE_LOAD	= EnumGen.item
+	STATE_RUN	= EnumGen.item
+	EnumGen.end
 
 	def __init__(self, mainWidget, parent=None):
 		QWidget.__init__(self, parent)
@@ -183,7 +186,9 @@ class CpuWidget(QWidget):
 			cpu.setScreenUpdateCallback(
 				self.__screenUpdateCallback, cpu)
 			self.__setState(self.STATE_LOAD)
+			sim.reset()
 			sim.load(parser.getParseTree())
+			sim.startup()
 		except AwlParserError as e:
 			MessageBox.handleAwlParserError(self, e)
 			self.stop()
@@ -206,6 +211,14 @@ class CpuWidget(QWidget):
 			MessageBox.handleAwlSimError(self,
 				"Error while executing code", e)
 			self.stop()
+		except MaintenanceRequest as e:
+			if e.requestType == MaintenanceRequest.TYPE_SHUTDOWN:
+				print("Shutting down, as requested...")
+				sim.shutdown()
+				QApplication.exit(0)
+				return
+			else:
+				assert(0)
 		except Exception:
 			handleFatalException(self)
 		sim.shutdown()

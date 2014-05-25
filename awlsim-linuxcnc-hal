@@ -20,15 +20,17 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 
+from __future__ import division, absolute_import, print_function, unicode_literals
+from awlsim.core.compat import *
 
 import sys
 import os
 import getopt
 
-from awlsim.main import AwlSim
-from awlsim.parser import AwlParser
-from awlsim.util import AwlSimError, AwlParserError, printInfo, printWarning, printError, str2bool
-from awlsim.version import VERSION_MAJOR, VERSION_MINOR
+from awlsim.core.main import AwlSim
+from awlsim.core.parser import AwlParser
+from awlsim.core.util import AwlSimError, AwlParserError, printInfo, printWarning, printError, str2bool
+from awlsim.core.version import VERSION_MAJOR, VERSION_MINOR
 
 try:
 	import hal as LinuxCNC_HAL
@@ -46,6 +48,9 @@ def checkLinuxCNC():
 			return True
 		except OSError:
 			pass
+	if not opt_checkcnc:
+		# The check is disabled. Return success.
+		return True
 	printError("LinuxCNC: doesn't seem to be running")
 	raise KeyboardInterrupt
 
@@ -110,19 +115,27 @@ def usage():
 	printInfo(" -o|--output-size 32     The output area size, in bytes.")
 	printInfo(" -O|--output-base 0      The AWL output address base.")
 	printInfo(" -g|--gui 1/0            Enable/disable the GUI (default off).")
+	printInfo("")
+	printInfo(" -1|--onecycle           Only run one cycle")
+	printInfo(" -C|--check-cnc 1/0      Enable/disable LinuxCNC runtime check (default on).")
 
 def main():
+	global opt_checkcnc
+
 	opt_inputSize = 32
 	opt_inputBase = 0
 	opt_outputSize = 32
 	opt_outputBase = 0
 	opt_gui = False
+	opt_onecycle = False
+	opt_checkcnc = True
 
 	try:
 		(opts, args) = getopt.getopt(sys.argv[1:],
-			"hi:I:o:O:g:",
+			"hi:I:o:O:g:C:1",
 			[ "help", "input-size=", "input-base=",
-			  "output-size=", "output-base=", "gui=", ])
+			  "output-size=", "output-base=", "gui=",
+			  "check-cnc=", "onecycle", ])
 	except getopt.GetoptError as e:
 		printError(str(e))
 		usage()
@@ -157,6 +170,10 @@ def main():
 				return 1
 		if o in ("-g", "--gui"):
 			opt_gui = str2bool(v)
+		if o in ("-1", "--onecycle"):
+			opt_onecycle = True
+		if o in ("-C", "--check-cnc"):
+			opt_checkcnc = str2bool(v)
 	if len(args) != 1:
 		usage()
 		return 1
@@ -193,14 +210,18 @@ def main():
 		if opt_gui:
 			mainwnd.cpuRun()
 			#TODO checkLinuxCNC() is not called.
+			#TODO --onecycle is not honored
 			mainwnd.runEventLoop()
 		else:
 			# Load the program
 			s.load(p.getParseTree())
+			s.startup()
 
 			# Run cyclic execution
 			while checkLinuxCNC():
 				s.runCycle()
+				if opt_onecycle:
+					break
 	except KeyboardInterrupt as e:
 		printInfo("Awlsim LinuxCNC HAL module shutdown")
 	except (AwlParserError, AwlSimError) as e:
