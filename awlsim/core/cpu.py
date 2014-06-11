@@ -31,6 +31,8 @@ from awlsim.core.parser import *
 from awlsim.core.symbolparser import *
 from awlsim.core.datatypes import *
 from awlsim.core.instructions.all_insns import *
+from awlsim.core.systemblocks.system_sfb import *
+from awlsim.core.systemblocks.system_sfc import *
 from awlsim.core.operators import *
 from awlsim.core.insntrans import *
 from awlsim.core.optrans import *
@@ -43,9 +45,6 @@ from awlsim.core.counters import *
 from awlsim.core.callstack import *
 from awlsim.core.obtemp import *
 from awlsim.core.util import *
-
-from awlsim.core.system_sfc import *
-from awlsim.core.system_sfb import *
 
 
 class ParenStackElem(object):
@@ -1160,6 +1159,9 @@ class S7CPU(object):
 		AwlOperator.IMM			: fetchIMM,
 		AwlOperator.IMM_REAL		: fetchIMM,
 		AwlOperator.IMM_S5T		: fetchIMM,
+		AwlOperator.IMM_TIME		: fetchIMM,
+		AwlOperator.IMM_DATE		: fetchIMM,
+		AwlOperator.IMM_TOD		: fetchIMM,
 		AwlOperator.IMM_PTR		: fetchIMM,
 		AwlOperator.MEM_E		: fetchE,
 		AwlOperator.MEM_A		: fetchA,

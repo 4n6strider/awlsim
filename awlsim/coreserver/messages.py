@@ -24,6 +24,7 @@ from awlsim.core.compat import *
 
 from awlsim.coreserver.memarea import *
 from awlsim.core.util import *
+from awlsim.core.datatypehelpers import *
 from awlsim.core.cpuspecs import *
 
 import struct
@@ -53,6 +54,7 @@ class AwlSimMessage(object):
     MSG_ID_PING		= EnumGen.item
     MSG_ID_PONG		= EnumGen.item
     MSG_ID_RESET		= EnumGen.item
+    MSG_ID_SHUTDOWN		= EnumGen.item
     MSG_ID_RUNSTATE		= EnumGen.item
     MSG_ID_LOAD_SYMTAB	= EnumGen.item
     MSG_ID_LOAD_CODE	= EnumGen.item
@@ -149,6 +151,10 @@ class AwlSimMessage_PONG(AwlSimMessage):
 class AwlSimMessage_RESET(AwlSimMessage):
     def __init__(self):
         AwlSimMessage.__init__(self, AwlSimMessage.MSG_ID_RESET)
+
+class AwlSimMessage_SHUTDOWN(AwlSimMessage):
+    def __init__(self):
+        AwlSimMessage.__init__(self, AwlSimMessage.MSG_ID_SHUTDOWN)
 
 class AwlSimMessage_RUNSTATE(AwlSimMessage):
     EnumGen.start
@@ -273,6 +279,9 @@ class AwlSimMessage_SET_OPT(AwlSimMessage):
         AwlSimMessage.__init__(self, AwlSimMessage.MSG_ID_SET_OPT)
         self.name = name
         self.value = value
+
+    def getStrValue(self):
+        return self.value
 
     def getIntValue(self):
         try:
@@ -452,13 +461,14 @@ class AwlSimMessage_MEMORY(AwlSimMessage):
     plHdrStruct = struct.Struct(str(">I"))
 
     # Payload memory area struct:
-    #	memType (8 bit)
-    #	flags (8 bit)
-    #	index (16 bit)
-    #	start (32 bit)
-    #	length (32 bit)
-    #	the actual binary data (variable length)
-    plAreaStruct = struct.Struct(str(">BBHII"))
+	#	memType (8 bit)
+	#	flags (8 bit)
+	#	index (16 bit)
+	#	start (32 bit)
+	#	specified length (32 bit)
+	#	actual length (32 bit)
+	#	the actual binary data (variable length, padded to 32-bit boundary)
+	plAreaStruct = struct.Struct(str(">BBHIII"))
 
     # Flags
     FLG_SYNC	= 1 << 0 # Synchronous. Returns a REPLY when finished.
@@ -471,36 +481,39 @@ class AwlSimMessage_MEMORY(AwlSimMessage):
     def toBytes(self):
         pl = [ self.plHdrStruct.pack(self.flags) ]
         for memArea in self.memAreas:
+            actualLength = len(memArea.data)
             pl.append(self.plAreaStruct.pack(memArea.memType,
                              memArea.flags,
                              memArea.index,
                              memArea.start,
-                             len(memArea.data)))
-            pl.append(memArea.data) #FIXME padding to 32bit?
+                             memArea.length,
+                             actualLength))
+            pl.append(memArea.data)
+            # Pad to a 32-bit boundary
+            pl.append(b'\x00' * (round_up(actualLength, 4) - actualLength))
         pl = b''.join(pl)
         return AwlSimMessage.toBytes(self, len(pl)) + pl
 
-    @classmethod
-    def fromBytes(cls, payload):
-        try:
-            offset = 0
-            (flags, ) = cls.plHdrStruct.unpack_from(payload, offset)
-            offset += cls.plHdrStruct.size
-            memAreas = []
-            while offset < len(payload):
-                memType, mFlags, index, start, length =\
-                    cls.plAreaStruct.unpack_from(payload, offset)
-                offset += cls.plAreaStruct.size
-                #FIXME pad length to 32bit?
-                data = payload[offset : offset + length]
-                offset += length
-                if len(data) != length:
-                    raise IndexError
-                memAreas.append(MemoryArea(memType, mFlags, index,
-                               start, length, data))
-        except (struct.error, IndexError) as e:
-            raise TransferError("MEMORY: Invalid data format")
-        return cls(flags, memAreas)
+	@classmethod
+	def fromBytes(cls, payload):
+		try:
+			offset = 0
+			(flags, ) = cls.plHdrStruct.unpack_from(payload, offset)
+			offset += cls.plHdrStruct.size
+			memAreas = []
+			while offset < len(payload):
+				memType, mFlags, index, start, length, actualLength =\
+					cls.plAreaStruct.unpack_from(payload, offset)
+				offset += cls.plAreaStruct.size
+				data = payload[offset : offset + actualLength]
+				offset += round_up(actualLength, 4)
+				if len(data) != actualLength:
+					raise IndexError
+				memAreas.append(MemoryArea(memType, mFlags, index,
+							   start, length, data))
+		except (struct.error, IndexError) as e:
+			raise TransferError("MEMORY: Invalid data format")
+		return cls(flags, memAreas)
 
 class AwlSimMessage_INSNSTATE(AwlSimMessage):
     # Payload data struct:
@@ -547,28 +560,30 @@ class AwlSimMessage_INSNSTATE(AwlSimMessage):
 class AwlSimMessageTransceiver(object):
     class RemoteEndDied(Exception): pass
 
-    id2class = {
-        AwlSimMessage.MSG_ID_REPLY		: AwlSimMessage_REPLY,
-        AwlSimMessage.MSG_ID_EXCEPTION		: AwlSimMessage_EXCEPTION,
-        AwlSimMessage.MSG_ID_PING		: AwlSimMessage_PING,
-        AwlSimMessage.MSG_ID_PONG		: AwlSimMessage_PONG,
-        AwlSimMessage.MSG_ID_RESET		: AwlSimMessage_RESET,
-        AwlSimMessage.MSG_ID_RUNSTATE		: AwlSimMessage_RUNSTATE,
-        AwlSimMessage.MSG_ID_LOAD_SYMTAB	: AwlSimMessage_LOAD_SYMTAB,
-        AwlSimMessage.MSG_ID_LOAD_CODE		: AwlSimMessage_LOAD_CODE,
-        AwlSimMessage.MSG_ID_LOAD_HW		: AwlSimMessage_LOAD_HW,
-        AwlSimMessage.MSG_ID_SET_OPT		: AwlSimMessage_SET_OPT,
-        AwlSimMessage.MSG_ID_CPUDUMP		: AwlSimMessage_CPUDUMP,
-        AwlSimMessage.MSG_ID_MAINTREQ		: AwlSimMessage_MAINTREQ,
-        AwlSimMessage.MSG_ID_GET_CPUSPECS	: AwlSimMessage_GET_CPUSPECS,
-        AwlSimMessage.MSG_ID_CPUSPECS		: AwlSimMessage_CPUSPECS,
-        AwlSimMessage.MSG_ID_REQ_MEMORY		: AwlSimMessage_REQ_MEMORY,
-        AwlSimMessage.MSG_ID_MEMORY		: AwlSimMessage_MEMORY,
-        AwlSimMessage.MSG_ID_INSNSTATE		: AwlSimMessage_INSNSTATE,
-    }
+	id2class = {
+		AwlSimMessage.MSG_ID_REPLY		: AwlSimMessage_REPLY,
+		AwlSimMessage.MSG_ID_EXCEPTION		: AwlSimMessage_EXCEPTION,
+		AwlSimMessage.MSG_ID_PING		: AwlSimMessage_PING,
+		AwlSimMessage.MSG_ID_PONG		: AwlSimMessage_PONG,
+		AwlSimMessage.MSG_ID_RESET		: AwlSimMessage_RESET,
+		AwlSimMessage.MSG_ID_SHUTDOWN		: AwlSimMessage_SHUTDOWN,
+		AwlSimMessage.MSG_ID_RUNSTATE		: AwlSimMessage_RUNSTATE,
+		AwlSimMessage.MSG_ID_LOAD_SYMTAB	: AwlSimMessage_LOAD_SYMTAB,
+		AwlSimMessage.MSG_ID_LOAD_CODE		: AwlSimMessage_LOAD_CODE,
+		AwlSimMessage.MSG_ID_LOAD_HW		: AwlSimMessage_LOAD_HW,
+		AwlSimMessage.MSG_ID_SET_OPT		: AwlSimMessage_SET_OPT,
+		AwlSimMessage.MSG_ID_CPUDUMP		: AwlSimMessage_CPUDUMP,
+		AwlSimMessage.MSG_ID_MAINTREQ		: AwlSimMessage_MAINTREQ,
+		AwlSimMessage.MSG_ID_GET_CPUSPECS	: AwlSimMessage_GET_CPUSPECS,
+		AwlSimMessage.MSG_ID_CPUSPECS		: AwlSimMessage_CPUSPECS,
+		AwlSimMessage.MSG_ID_REQ_MEMORY		: AwlSimMessage_REQ_MEMORY,
+		AwlSimMessage.MSG_ID_MEMORY		: AwlSimMessage_MEMORY,
+		AwlSimMessage.MSG_ID_INSNSTATE		: AwlSimMessage_INSNSTATE,
+	}
 
-    def __init__(self, sock):
-        self.sock = sock
+	def __init__(self, sock, peerInfoString):
+		self.sock = sock
+		self.peerInfoString = peerInfoString
 
         # Transmit status
         self.txSeqCount = 0
@@ -579,83 +594,98 @@ class AwlSimMessageTransceiver(object):
         self.seq = None
         self.payloadLen = None
 
-        self.sock.setblocking(False)
+		try:
+			if isJython: #XXX Workaround
+				self.sock.setblocking(True)
+			self.__timeout = None
+			self.sock.settimeout(self.__timeout)
 
-    def shutdown(self):
-        if self.sock:
-            try:
-                self.sock.shutdown(socket.SHUT_RDWR)
-            except socket.error as e:
-                pass
-            try:
-                self.sock.close()
-            except socket.error as e:
-                pass
-            self.sock = None
+			if self.sock.family in (socket.AF_INET, socket.AF_INET6) and\
+			   self.sock.type == socket.SOCK_STREAM:
+				self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+			self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
+			self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
+		except socket.error as e:
+			raise AwlSimError("Failed to initialize socket: %s" % str(e))
 
-    def send(self, msg):
-        msg.seq = self.txSeqCount
-        self.txSeqCount = (self.txSeqCount + 1) & 0xFFFF
+	def shutdown(self):
+		if self.sock:
+			try:
+				self.sock.shutdown(socket.SHUT_RDWR)
+			except socket.error as e:
+				pass
+			try:
+				self.sock.close()
+			except socket.error as e:
+				pass
+			self.sock = None
 
-        offset, data = 0, msg.toBytes()
-        while offset < len(data):
-            try:
-                offset += self.sock.send(data[offset : ])
-            except socket.error as e:
-                if e.errno != errno.EAGAIN:
-                    raise TransferError(str(e))
+	def send(self, msg, timeout=None):
+		if timeout != self.__timeout:
+			self.sock.settimeout(timeout)
+			self.__timeout = timeout
 
-    def receive(self):
-        hdrLen = AwlSimMessage.HDR_LENGTH
-        if len(self.buf) < hdrLen:
-            try:
-                data = self.sock.recv(hdrLen - len(self.buf))
-            except socket.error as e:
-                if e.errno == errno.EWOULDBLOCK:
-                    return None
-                raise
-            if not data:
-                # The remote end closed the connection
-                raise self.RemoteEndDied()
-            self.buf += data
-            if len(self.buf) < hdrLen:
-                return None
-            try:
-                magic, self.msgId, self.seq, _reserved, self.payloadLen =\
-                    AwlSimMessage.hdrStruct.unpack(self.buf)
-            except struct.error as e:
-                raise AwlSimError("Received message with invalid "
-                    "header format.")
-            if magic != AwlSimMessage.HDR_MAGIC:
-                raise AwlSimError("Received message with invalid "
-                    "magic value (was 0x%04X, expected 0x%04X)." %\
-                    (magic, AwlSimMessage.HDR_MAGIC))
-            if self.payloadLen:
-                return None
-        if len(self.buf) < hdrLen + self.payloadLen:
-            data = self.sock.recv(hdrLen + self.payloadLen - len(self.buf))
-            if not data:
-                # The remote end closed the connection
-                raise self.RemoteEndDied()
-            self.buf += data
-            if len(self.buf) < hdrLen + self.payloadLen:
-                return None
-        try:
-            cls = self.id2class[self.msgId]
-        except KeyError:
-            raise AwlSimError("Received unknown message: 0x%04X" %\
-                self.msgId)
-        msg = cls.fromBytes(self.buf[hdrLen : ])
-        msg.seq = self.seq
-        self.buf, self.msgId, self.seq, self.payloadLen = b"", None, None, None
-        return msg
+		msg.seq = self.txSeqCount
+		self.txSeqCount = (self.txSeqCount + 1) & 0xFFFF
 
-    def receiveBlocking(self, timeoutSec=None):
-        try:
-            self.sock.settimeout(timeoutSec)
-            msg = self.receive()
-        except socket.timeout:
-            return None
-        finally:
-            self.sock.setblocking(False)
-        return msg
+		offset, data = 0, msg.toBytes()
+		while offset < len(data):
+			try:
+				offset += self.sock.send(data[offset : ])
+			except (socket.error, BlockingIOError) as e:
+				if e.errno != errno.EAGAIN and\
+				   e.errno != errno.EWOULDBLOCK and\
+				   not isinstance(e, BlockingIOError) and\
+				   not isinstance(e, socket.timeout):
+					raise TransferError(str(e))
+
+	def receive(self, timeout=0.0):
+		if timeout != self.__timeout:
+			self.sock.settimeout(timeout)
+			self.__timeout = timeout
+
+		hdrLen = AwlSimMessage.HDR_LENGTH
+		if len(self.buf) < hdrLen:
+			try:
+				data = self.sock.recv(hdrLen - len(self.buf))
+			except (socket.error, BlockingIOError) as e:
+				if e.errno == errno.EAGAIN or\
+				   e.errno == errno.EWOULDBLOCK or\
+				   isinstance(e, BlockingIOError):
+					return None
+				raise
+			if not data:
+				# The remote end closed the connection
+				raise self.RemoteEndDied()
+			self.buf += data
+			if len(self.buf) < hdrLen:
+				return None
+			try:
+				magic, self.msgId, self.seq, _reserved, self.payloadLen =\
+					AwlSimMessage.hdrStruct.unpack(self.buf)
+			except struct.error as e:
+				raise AwlSimError("Received message with invalid "
+					"header format.")
+			if magic != AwlSimMessage.HDR_MAGIC:
+				raise AwlSimError("Received message with invalid "
+					"magic value (was 0x%04X, expected 0x%04X)." %\
+					(magic, AwlSimMessage.HDR_MAGIC))
+			if self.payloadLen:
+				return None
+		if len(self.buf) < hdrLen + self.payloadLen:
+			data = self.sock.recv(hdrLen + self.payloadLen - len(self.buf))
+			if not data:
+				# The remote end closed the connection
+				raise self.RemoteEndDied()
+			self.buf += data
+			if len(self.buf) < hdrLen + self.payloadLen:
+				return None
+		try:
+			cls = self.id2class[self.msgId]
+		except KeyError:
+			raise AwlSimError("Received unknown message: 0x%04X" %\
+				self.msgId)
+		msg = cls.fromBytes(self.buf[hdrLen : ])
+		msg.seq = self.seq
+		self.buf, self.msgId, self.seq, self.payloadLen = b"", None, None, None
+		return msg

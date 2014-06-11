@@ -70,6 +70,11 @@ class AwlSimClient(object):
 				"any of the supplied Python interpreters: %s\n"
 				"No interpreter found." %\
 				str(interpreter))
+		if isJython:
+			#XXX Workaround: Jython's socket module does not like connecting
+			# to a starting server. Wait a few seconds for the server
+			# to start listening on the socket.
+			time.sleep(10)
 
 	def connectToServer(self,
 			    host=AwlSimServer.DEFAULT_HOST,
@@ -78,22 +83,25 @@ class AwlSimClient(object):
 		host -> The hostname or IP address to connect to.
 		port -> The port to connect to."""
 
-		printInfo("AwlSimClient: Connecting to server '%s (port %d)'..." %\
-			(host, port))
 		try:
 			family, socktype, sockaddr = AwlSimServer.getaddrinfo(host, port)
+			if family == AF_UNIX:
+				readableSockaddr = sockaddr
+			else:
+				readableSockaddr = "%s:%d" % (sockaddr[0], sockaddr[1])
+			printInfo("AwlSimClient: Connecting to server '%s'..." % readableSockaddr)
 			sock = socket.socket(family, socktype)
 			count = 0
 			while 1:
 				try:
 					sock.connect(sockaddr)
 				except (OSError, socket.error) as e:
-					if e.errno == errno.ECONNREFUSED:
+					if e.errno == errno.ECONNREFUSED or\
+					   e.errno == errno.ENOENT:
 						count += 1
 						if count >= 100:
 							raise AwlSimError("Timeout connecting "
-								"to AwlSimServer %s (port %d)" %\
-								(host, port))
+								"to AwlSimServer %s" % readableSockaddr)
 						self.sleep(0.1)
 						continue
 					if isJython and\
@@ -104,16 +112,16 @@ class AwlSimClient(object):
 					raise
 				break
 		except socket.error as e:
-			raise AwlSimError("Failed to connect to AwlSimServer %s (port %d): %s" %\
-				(host, port, str(e)))
+			raise AwlSimError("Failed to connect to AwlSimServer %s: %s" %\
+				(readableSockaddr, str(e)))
 		printInfo("AwlSimClient: Connected.")
-		self.transceiver = AwlSimMessageTransceiver(sock)
+		self.transceiver = AwlSimMessageTransceiver(sock, readableSockaddr)
 		self.lastRxMsg = None
 
 		# Ping the server
 		try:
 			self.transceiver.send(AwlSimMessage_PING())
-			msg = self.transceiver.receiveBlocking(timeoutSec = 5.0)
+			msg = self.transceiver.receive(timeout = 5.0)
 			if not msg:
 				raise AwlSimError("AwlSimClient: Server did not "
 					"respond to PING request.")
@@ -128,13 +136,21 @@ class AwlSimClient(object):
 	def shutdown(self):
 		"""Shutdown all sockets and spawned processes."""
 
-		if self.transceiver:
-			self.transceiver.shutdown()
-			self.transceiver = None
 		if self.serverProcess:
+			try:
+				msg = AwlSimMessage_SHUTDOWN()
+				status = self.__sendAndWaitFor_REPLY(msg)
+				if status != AwlSimMessage_REPLY.STAT_OK:
+					printError("AwlSimClient: Failed to shut down server via message")
+			except (AwlSimError, MaintenanceRequest) as e:
+				pass
+
 			self.serverProcess.terminate()
 			self.serverProcess.wait()
 			self.serverProcess = None
+		if self.transceiver:
+			self.transceiver.shutdown()
+			self.transceiver = None
 
 	def __rx_NOP(self, msg):
 		pass # Nothing
@@ -192,28 +208,31 @@ class AwlSimClient(object):
 		AwlSimMessage.MSG_ID_INSNSTATE		: __rx_INSNSTATE,
 	}
 
-	def processMessages(self, blocking=False):
+	# Main message processing
+	# timeout: None -> Blocking. Block until packet is received.
+	#          0 -> No timeout (= Nonblocking). Return immediately.
+	#          x -> Timeout, in seconds.
+	def processMessages(self, timeout=None):
 		self.lastRxMsg = None
 		if not self.transceiver:
 			return False
 		try:
-			if blocking:
-				msg = self.transceiver.receiveBlocking()
-			else:
-				msg = self.transceiver.receive()
-		except socket.error as e:
-			if e.errno == errno.EAGAIN:
+			msg = self.transceiver.receive(timeout)
+		except (socket.error, BlockingIOError) as e:
+			if isinstance(e, socket.timeout) or\
+			   isinstance(e, BlockingIOError) or\
+			   e.errno == errno.EAGAIN or\
+			   e.errno == errno.EWOULDBLOCK:
 				return False
-			host, port = self.transceiver.sock.getpeername()
 			raise AwlSimError("AwlSimClient: "
-				"I/O error in connection to server '%s (port %d)':\n%s" %\
-				(host, port, str(e)))
+				"I/O error in connection to server '%s':\n"
+				"%s (errno = %s)" %\
+				(self.transceiver.peerInfoString, str(e), str(e.errno)))
 		except (AwlSimMessageTransceiver.RemoteEndDied, TransferError) as e:
-			host, port = self.transceiver.sock.getpeername()
 			raise AwlSimError("AwlSimClient: "
-				"Connection to server '%s:%s' died. "
+				"Connection to server '%s' died. "
 				"Failed to receive message." %\
-				(host, port))
+				self.transceiver.peerInfoString)
 		if not msg:
 			return False
 		self.lastRxMsg = msg
@@ -233,13 +252,10 @@ class AwlSimClient(object):
 		now = monotonic_time()
 		end = now + waitTimeout
 		while now < end:
-			if self.processMessages():
+			if self.processMessages(0.1):
 				rxMsg = self.lastRxMsg
 				if checkRxMsg(rxMsg):
 					return rxMsg
-			else:
-				# Queue is empty.
-				pass#XXX self.sleep(0.01)
 			now = monotonic_time()
 		raise AwlSimError("AwlSimClient: Timeout waiting for server reply.")
 
@@ -294,13 +310,16 @@ class AwlSimClient(object):
 			raise AwlSimError("AwlSimClient: Failed to load hardware module")
 		return True
 
-	def __setOption(self, name, value):
+	def __setOption(self, name, value, sync=True):
 		if not self.transceiver:
 			return False
 		msg = AwlSimMessage_SET_OPT(name, str(value))
-		status = self.__sendAndWaitFor_REPLY(msg)
-		if status != AwlSimMessage_REPLY.STAT_OK:
-			raise AwlSimError("AwlSimClient: Failed to set option '%s'" % name)
+		if sync:
+			status = self.__sendAndWaitFor_REPLY(msg)
+			if status != AwlSimMessage_REPLY.STAT_OK:
+				raise AwlSimError("AwlSimClient: Failed to set option '%s'" % name)
+		else:
+			self.transceiver.send(msg)
 		return True
 
 	def setLoglevel(self, level=Logging.LOG_INFO):
@@ -319,8 +338,14 @@ class AwlSimClient(object):
 	def setCycleTimeLimit(self, seconds=5.0):
 		return self.__setOption("cycle_time_limit", float(seconds))
 
-	def setInsnStateDump(self, enable=True):
-		return self.__setOption("insn_state_dump", int(bool(enable)))
+	# Set instruction state dumping.
+	# fromLine, toLine is the range of AWL line numbers for which
+	# dumping is enabled.
+	# If fromLine=0, dumping is disabled.
+	def setInsnStateDump(self, fromLine=1, toLine=0x7FFFFFFF, sync=True):
+		return self.__setOption("insn_state_dump",
+					"%d-%d" % (fromLine, toLine),
+					sync = sync)
 
 	def getCpuSpecs(self):
 		if not self.transceiver:

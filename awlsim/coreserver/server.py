@@ -38,6 +38,11 @@ import socket
 import errno
 import time
 
+if hasattr(socket, "AF_UNIX"):
+	AF_UNIX = socket.AF_UNIX
+else:
+	AF_UNIX = None
+
 
 class AwlSimServer(object):
 	DEFAULT_HOST	= "localhost"
@@ -51,21 +56,23 @@ class AwlSimServer(object):
 	STATE_EXIT	= EnumGen.item
 	EnumGen.end
 
+	# Command mask bits
+	CMDMSK_SHUTDOWN	= (1 << 0) # Allow shutdown command
+
 	class Client(object):
 		"""Client information."""
 
-		def __init__(self, sock, host, port):
+		def __init__(self, sock, peerInfoString):
 			# Socket
 			self.socket = sock
-			self.host = host
-			self.port = port
-			self.transceiver = AwlSimMessageTransceiver(sock)
+			self.transceiver = AwlSimMessageTransceiver(sock, peerInfoString)
 
 			# CPU-dump
 			self.dumpInterval = 0
 			self.nextDump = 0
 			# Instruction state dump
-			self.insnStateDump = False
+			self.insnStateDump_fromLine = 0
+			self.insnStateDump_toLine = 0
 
 			# Memory read requests
 			self.memReadRequestMsg = None
@@ -74,8 +81,15 @@ class AwlSimServer(object):
 
 	@classmethod
 	def getaddrinfo(cls, host, port):
-		family, socktype, proto, canonname, sockaddr =\
-			socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)[0]
+		family, socktype = socket.AF_INET, socket.SOCK_STREAM
+		if os.name == "posix" and host == "localhost" and False: #XXX disabled, for now
+			# We are on posix OS. Instead of AF_INET on localhost,
+			# we use Unix domain sockets.
+			family, socktype = AF_UNIX, socket.SOCK_STREAM
+			sockaddr = "/tmp/awlsim-server-%d.socket" % port
+		else:
+			family, socktype, proto, canonname, sockaddr =\
+				socket.getaddrinfo(host, port, family, socktype)[0]
 		return (family, socktype, sockaddr)
 
 	@classmethod
@@ -84,6 +98,13 @@ class AwlSimServer(object):
 		result = True
 		try:
 			family, socktype, sockaddr = AwlSimServer.getaddrinfo(host, port)
+			if family == AF_UNIX:
+				try:
+					os.stat(sockaddr)
+				except OSError as e:
+					if e.errno == errno.ENOENT:
+						return True
+				return False
 			sock = socket.socket(family, socktype)
 			sock.bind(sockaddr)
 		except socket.error as e:
@@ -104,28 +125,34 @@ class AwlSimServer(object):
 		return distutils.spawn.find_executable(executable)
 
 	@classmethod
-	def start(cls, listenHost, listenPort, forkInterpreter=None):
+	def start(cls, listenHost, listenPort,
+		  forkInterpreter=None,
+		  commandMask=CMDMSK_SHUTDOWN):
 		"""Start a new server.
 		If 'forkInterpreter' is not None, spawn a subprocess.
 		If 'forkInterpreter' is None, run the server in this process."""
 
-		environment = {
-			AwlSimServer.ENV_MAGIC		: AwlSimServer.ENV_MAGIC,
-			"AWLSIM_CORESERVER_HOST"	: str(listenHost),
-			"AWLSIM_CORESERVER_PORT"	: str(listenPort),
-			"AWLSIM_CORESERVER_LOGLEVEL"	: str(Logging.getLoglevel()),
-		}
+		# Prepare the environment for the server process.
+		# Inherit from the starter and add awlsim specific variables.
+		env = dict(os.environ)
+		env[AwlSimServer.ENV_MAGIC]		= AwlSimServer.ENV_MAGIC
+		env["AWLSIM_CORESERVER_HOST"]		= str(listenHost)
+		env["AWLSIM_CORESERVER_PORT"]		= str(int(listenPort))
+		env["AWLSIM_CORESERVER_LOGLEVEL"]	= str(Logging.getLoglevel())
+		env["AWLSIM_CORESERVER_CMDMSK"]		= str(int(commandMask))
 
 		if forkInterpreter is None:
-			return cls._execute(environment)
+			# Do not fork. Just run the server in this process.
+			return cls._execute(env)
 		else:
+			# Fork a new interpreter process and run server.py as module.
 			interp = cls.findExecutable(forkInterpreter)
 			printInfo("Forking awlsim core server with interpreter '%s'" % interp)
 			if not interp:
 				raise AwlSimError("Failed to find interpreter "
 						  "executable '%s'" % forkInterpreter)
 			serverProcess = PopenWrapper([interp, "-m", "awlsim.coreserver.server"],
-						     env = environment,
+						     env = env,
 						     shell = False)
 			return serverProcess
 
@@ -137,14 +164,14 @@ class AwlSimServer(object):
 		server, retval = None, 0
 		try:
 			server = AwlSimServer()
-			for sig in (signal.SIGTERM, signal.SIGINT):
+			for sig in (signal.SIGTERM, ):
 				signal.signal(sig, server.signalHandler)
 			server.runFromEnvironment(env)
 		except AwlSimError as e:
 			print(e.getReport())
 			retval = 1
 		except KeyboardInterrupt:
-			print("Interrupted.")
+			print("AwlSimServer: Interrupted.")
 		finally:
 			if server:
 				server.close()
@@ -153,8 +180,10 @@ class AwlSimServer(object):
 	def __init__(self):
 		self.state = -1
 		self.__setRunState(self.STATE_INIT)
+		self.commandMask = 0
 		self.sim = None
 		self.socket = None
+		self.unixSockPath = None
 		self.clients = []
 
 	def runFromEnvironment(self, env=None):
@@ -185,7 +214,12 @@ class AwlSimServer(object):
 		except (TypeError, ValueError) as e:
 			raise AwlSimError("AwlSimServer: No listen port specified")
 
-		self.run(host, port)
+		try:
+			commandMask = int(env.get("AWLSIM_CORESERVER_CMDMSK"))
+		except (TypeError, ValueError) as e:
+			raise AwlSimError("AwlSimServer: No command mask specified")
+
+		self.run(host, port, commandMask)
 
 	def __setRunState(self, runstate):
 		if self.state == self.STATE_EXIT:
@@ -216,19 +250,25 @@ class AwlSimServer(object):
 		insn = cpu.getCurrentInsn()
 		if not insn:
 			return
-		msg = AwlSimMessage_INSNSTATE(insn.getLineNr() & 0xFFFFFFFF,
-					      self.__insnSerial,
-					      0,
-					      cpu.statusWord.getWord(),
-					      cpu.accu1.get(),
-					      cpu.accu2.get(),
-					      cpu.ar1.get(),
-					      cpu.ar2.get(),
-					      cpu.dbRegister.index & 0xFFFF,
-					      cpu.diRegister.index & 0xFFFF)
+		lineNr, msg = insn.getLineNr(), None
 		for client in self.clients:
-			if client.insnStateDump:
-				client.transceiver.send(msg)
+			if client.insnStateDump_fromLine == 0 or\
+			   lineNr < client.insnStateDump_fromLine or\
+			   lineNr > client.insnStateDump_toLine:
+				continue
+			if not msg:
+				msg = AwlSimMessage_INSNSTATE(
+					lineNr & 0xFFFFFFFF,
+					self.__insnSerial,
+					0,
+					cpu.statusWord.getWord(),
+					cpu.accu1.get(),
+					cpu.accu2.get(),
+					cpu.ar1.get(),
+					cpu.ar2.get(),
+					cpu.dbRegister.index & 0xFFFF,
+					cpu.diRegister.index & 0xFFFF)
+			client.transceiver.send(msg)
 		self.__insnSerial += 1
 
 	def __cpuCycleExitCallback(self, userData):
@@ -241,13 +281,13 @@ class AwlSimServer(object):
 			self.sim.cpu.setBlockExitCallback(None)
 
 	def __updateCpuPostInsnCallback(self):
-		if any(c.insnStateDump for c in self.clients):
+		if any(c.insnStateDump_fromLine != 0 for c in self.clients):
 			self.sim.cpu.setPostInsnCallback(self.__cpuPostInsnCallback, None)
 		else:
 			self.sim.cpu.setPostInsnCallback(None)
 
 	def __updateCpuCycleExitCallback(self):
-		if any(c.insnStateDump for c in self.clients):
+		if any(c.insnStateDump_fromLine != 0 for c in self.clients):
 			self.sim.cpu.setCycleExitCallback(self.__cpuCycleExitCallback, None)
 		else:
 			self.sim.cpu.setCycleExitCallback(None)
@@ -262,6 +302,14 @@ class AwlSimServer(object):
 		status = AwlSimMessage_REPLY.STAT_OK
 		self.__setRunState(self.STATE_INIT)
 		self.sim.reset()
+		client.transceiver.send(AwlSimMessage_REPLY.make(msg, status))
+
+	def __rx_SHUTDOWN(self, client, msg):
+		status = AwlSimMessage_REPLY.STAT_FAIL
+		if self.commandMask & AwlSimServer.CMDMSK_SHUTDOWN:
+			printInfo("AwlSimServer: Exiting due to shutdown command")
+			self.__setRunState(self.STATE_EXIT)
+			status = AwlSimMessage_REPLY.STAT_OK
 		client.transceiver.send(AwlSimMessage_REPLY.make(msg, status))
 
 	def __rx_RUNSTATE(self, client, msg):
@@ -319,7 +367,16 @@ class AwlSimServer(object):
 		elif msg.name == "cycle_time_limit":
 			self.sim.cpu.setCycleTimeLimit(msg.getFloatValue())
 		elif msg.name == "insn_state_dump":
-			client.insnStateDump = msg.getBoolValue()
+			val = msg.getStrValue().split("-")
+			try:
+				if len(val) != 2:
+					raise ValueError
+				fromLine = int(val[0])
+				toLine = int(val[1])
+			except ValueError as e:
+				raise AwlSimError("insn_state_dump: invalid value")
+			client.insnStateDump_fromLine = fromLine
+			client.insnStateDump_toLine = toLine
 			self.__updateCpuPostInsnCallback()
 			self.__updateCpuCycleExitCallback()
 		else:
@@ -367,6 +424,7 @@ class AwlSimServer(object):
 		AwlSimMessage.MSG_ID_PING		: __rx_PING,
 		AwlSimMessage.MSG_ID_PONG		: __rx_PONG,
 		AwlSimMessage.MSG_ID_RESET		: __rx_RESET,
+		AwlSimMessage.MSG_ID_SHUTDOWN		: __rx_SHUTDOWN,
 		AwlSimMessage.MSG_ID_RUNSTATE		: __rx_RUNSTATE,
 		AwlSimMessage.MSG_ID_LOAD_CODE		: __rx_LOAD_CODE,
 		AwlSimMessage.MSG_ID_LOAD_SYMTAB	: __rx_LOAD_SYMTAB,
@@ -380,16 +438,15 @@ class AwlSimServer(object):
 
 	def __handleClientComm(self, client):
 		try:
-			msg = client.transceiver.receive()
+			msg = client.transceiver.receive(0.0)
 		except AwlSimMessageTransceiver.RemoteEndDied as e:
-			printInfo("AwlSimServer: Client '%s (port %d)' died" %\
-				(client.host, client.port))
+			printInfo("AwlSimServer: Client '%s' died" % client.transceiver.peerInfoString)
 			self.__clientRemove(client)
 			return
 		except (TransferError, socket.error) as e:
-			printInfo("AwlSimServer: Client '%s (port %d)' data "
+			printInfo("AwlSimServer: Client '%s' data "
 				"transfer error:\n%s" %\
-				(client.host, client.port, str(e)))
+				(client.transceiver.peerInfoString, str(e)))
 			return
 		if not msg:
 			return
@@ -444,8 +501,10 @@ class AwlSimServer(object):
 				if not client.repetitionFactor:
 					self.memReadRequestMsg = None
 
-	def run(self, host, port):
+	def run(self, host, port, commandMask):
 		"""Run the server on 'host':'port'."""
+
+		self.commandMask = commandMask
 
 		self.__listen(host, port)
 		self.__rebuildSelectReadList()
@@ -465,9 +524,9 @@ class AwlSimServer(object):
 
 				if self.state == self.STATE_RUN:
 					while self.__running:
-						self.__handleCommunication()
 						sim.runCycle()
 						self.__handleMemReadReqs()
+						self.__handleCommunication()
 					continue
 
 			except (AwlSimError, AwlParserError) as e:
@@ -495,9 +554,14 @@ class AwlSimServer(object):
 		"""Listen on 'host':'port'."""
 
 		self.close()
-		printInfo("AwlSimServer: Listening on %s (port %d)..." % (host, port))
 		try:
 			family, socktype, sockaddr = AwlSimServer.getaddrinfo(host, port)
+			if family == AF_UNIX:
+				self.unixSockPath = sockaddr
+				readableSockaddr = sockaddr
+			else:
+				readableSockaddr = "%s:%d" % (sockaddr[0], sockaddr[1])
+			printInfo("AwlSimServer: Listening on %s..." % readableSockaddr)
 			sock = socket.socket(family, socktype)
 			sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 			sock.setblocking(False)
@@ -517,16 +581,19 @@ class AwlSimServer(object):
 
 		try:
 			clientSock, addrInfo = self.socket.accept()
-			clientHost, clientPort = addrInfo[:2]
-		except socket.error as e:
-			if e.errno == errno.EWOULDBLOCK or\
+			if self.unixSockPath:
+				peerInfoString = self.unixSockPath
+			else:
+				peerInfoString = "%s:%d" % addrInfo[:2]
+		except (socket.error, BlockingIOError) as e:
+			if isinstance(e, BlockingIOError) or\
+			   e.errno == errno.EWOULDBLOCK or\
 			   e.errno == errno.EAGAIN:
 				return None
 			raise AwlSimError("AwlSimServer: accept() failed: %s" % str(e))
-		host, port = addrInfo[0], addrInfo[1]
-		printInfo("AwlSimServer: Client '%s (port %d)' connected" % (host, port))
+		printInfo("AwlSimServer: Client '%s' connected" % peerInfoString)
 
-		client = self.Client(clientSock, clientHost, clientPort)
+		client = self.Client(clientSock, peerInfoString)
 		self.__clientAdd(client)
 
 		return client
@@ -565,6 +632,12 @@ class AwlSimServer(object):
 			except socket.error as e:
 				pass
 			self.socket = None
+		if self.unixSockPath:
+			try:
+				os.unlink(self.unixSockPath)
+			except OSError as e:
+				pass
+			self.unixSockPath = None
 
 	def signalHandler(self, sig, frame):
 		printInfo("AwlSimServer: Received signal %d" % sig)

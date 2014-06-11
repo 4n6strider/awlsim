@@ -2,7 +2,7 @@
 #
 # AWL simulator - GUI edit widget
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,6 +26,13 @@ from awlsim.gui.util import *
 from awlsim.gui.cpuwidget import *
 
 
+def _setFontParams(font):
+	font.setFamily("courier")
+	font.setPointSize(10)
+	font.setKerning(False)
+	font.setFixedPitch(True)
+	font.setStyleHint(QFont.TypeWriter, QFont.PreferBitmap)
+
 class EditSubWidget(QWidget):
 	needRepaint = Signal(QPaintEvent)
 	wasScrolled = Signal(QWheelEvent)
@@ -36,6 +43,7 @@ class EditSubWidget(QWidget):
 
 	def paintEvent(self, ev):
 		self.needRepaint.emit(ev)
+		ev.accept()
 
 	def wheelEvent(self, ev):
 		self.wasScrolled.emit(ev)
@@ -43,10 +51,7 @@ class EditSubWidget(QWidget):
 	def getPainter(self):
 		p = QPainter(self)
 		font = p.font()
-		font.setFamily("Mono")
-		font.setKerning(False)
-		font.setFixedPitch(True)
-		font.setStyleStrategy(QFont.PreferBitmap)
+		_setFontParams(font)
 		p.setFont(font)
 		return p
 
@@ -72,21 +77,20 @@ class CpuStatsSubWidget(EditSubWidget):
 		return QSize(self.editWidget.cpuStatsWidgetWidth(), 0)
 
 	def getBanner(self):
-		return "STW          ACCU 1    ACCU 2"
+		return "STW          ACCU 1    ACCU 2  "
 
 class CpuStatsEntry(object):
 	def __init__(self, stamp, statusWord, accu1, accu2):
 		self.stamp = stamp
 		self.obsolete = False
-		self.statusWord = statusWord.getWord()
-		self.accu1 = accu1.getDWord()
-		self.accu2 = accu2.getDWord()
-
-	@staticmethod
-	def getTextWidth():
-		return 11 + 2 + 8 + 2 + 8
+		self.pruned = False
+		self.statusWord = statusWord
+		self.accu1 = accu1
+		self.accu2 = accu2
 
 	def __repr__(self):
+		if self.pruned:
+			return "[ ... ]"
 		stw = []
 		for i in range(S7StatusWord.NR_BITS - 1, -1, -1):
 			stw.append('1' if (self.statusWord & (1 << i)) else '0')
@@ -97,12 +101,17 @@ class CpuStatsEntry(object):
 
 class EditWidget(QPlainTextEdit):
 	codeChanged = Signal()
+	visibleRangeChanged = Signal()
 
 	__aniChars = ( ' ', '.', 'o', '0', 'O', '0', 'o', '.' )
 
 	def __init__(self, mainWidget):
 		QPlainTextEdit.__init__(self, mainWidget)
 		self.mainWidget = mainWidget
+
+		self.__aniTimer = QTimer(self)
+		self.__aniTimer.setSingleShot(False)
+		self.__aniTimer.timeout.connect(self.__animation)
 
 		self.__updateFonts()
 
@@ -118,7 +127,7 @@ class EditWidget(QPlainTextEdit):
 		self.__runStateCopy = CpuWidget.STATE_STOP
 		self.__nextHdrUpdate = 0
 		self.__hdrAniStat = 0
-		self.enableCpuStats(False)
+		self.enableCpuStats(enabled=False, force=True)
 		self.resetCpuStats(True)
 
 		self.__textChangeBlocked = 0
@@ -135,26 +144,55 @@ class EditWidget(QPlainTextEdit):
 
 	def runStateChanged(self, newState):
 		self.__runStateCopy = newState
-		if newState == CpuWidget.STATE_PARSE:
+		if newState == CpuWidget.STATE_INIT:
 			self.resetCpuStats()
+		if newState == CpuWidget.STATE_RUN:
+			self.__aniTimer.start(200)
+		else:
+			self.__aniTimer.stop()
 		if self.__cpuStatsEnabled:
 			self.cpuStatsWidget.update()
 		self.headerWidget.update()
 
+	def __eachVisibleLine(self):
+		block = self.firstVisibleBlock()
+		top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+		bottom = top + self.blockBoundingRect(block).height()
+
+		while block.isValid() and\
+		      block.isVisible() and\
+		      top <= self.viewport().rect().bottom():
+			yield (block.blockNumber() + 1, top)
+			block = block.next()
+			top = bottom
+			bottom = top + self.blockBoundingRect(block).height()
+
+	def getVisibleLineRange(self):
+		firstVisibleLine = lastVisibleLine = 0
+		for lineNr, yOffset in self.__eachVisibleLine():
+			if firstVisibleLine == 0 or\
+			   lineNr < firstVisibleLine:
+				firstVisibleLine = lineNr
+			if lineNr > lastVisibleLine:
+				lastVisibleLine = lineNr
+		return firstVisibleLine, lastVisibleLine
+
 	def __updateFonts(self):
 		fmt = self.currentCharFormat()
-		fmt.setFontFamily("Mono")
-		fmt.setFontKerning(False)
-		fmt.setFontFixedPitch(True)
-		fmt.setFontStyleStrategy(QFont.PreferBitmap)
+		font = fmt.font()
+		_setFontParams(font)
+		fmt.setFont(font)
 		self.setCurrentCharFormat(fmt)
-		self.__charWidth = self.fontMetrics().width('X')
+		font = self.font()
+		_setFontParams(font)
+		self.setFont(font)
 		self.__charHeight = self.fontMetrics().height()
 
-	def enableCpuStats(self, enabled=True):
-		self.__cpuStatsEnabled = enabled
-		self.__updateMargins()
-		self.__updateGeo()
+	def enableCpuStats(self, enabled=True, force=False):
+		if force or enabled != self.__cpuStatsEnabled:
+			self.__cpuStatsEnabled = enabled
+			self.__updateMargins()
+			self.__updateGeo()
 
 	def resetCpuStats(self, force=False):
 		if not force and not self.__lineCpuStats:
@@ -167,37 +205,42 @@ class EditWidget(QPlainTextEdit):
 		self.headerWidget.update()
 		self.cpuStatsWidget.update()
 
-	def updateCpuStats_afterInsn(self, cpu):
-		insn = cpu.getCurrentInsn()
-		if not self.__cpuStatsEnabled or not insn:
-			return
-		self.__lineCpuStats[insn.getLineNr() - 1] =\
-			CpuStatsEntry(self.__cpuStatsStamp,
-				      cpu.getStatusWord(),
-				      cpu.getAccu(1),
-				      cpu.getAccu(2))
-		self.__cpuStatsCount += 1
-
-	def updateCpuStats_afterBlock(self, cpu):
-		if cpu.now >= self.__nextHdrUpdate:
-			self.__nextHdrUpdate = cpu.now + 0.2
-			self.__hdrAniStat = (self.__hdrAniStat + 1) %\
-					    len(self.__aniChars)
-			self.headerWidget.update()
+	def updateCpuStats_afterInsn(self, insnDumpMsg):
+		# insnDumpMsg => AwlSimMessage_INSNDUMP instance
 		if not self.__cpuStatsEnabled:
 			return
-		# Update the 'obsolete'-flag based on the timestamp
-		for ent in self.__lineCpuStats.values():
-			ent.obsolete = (ent.stamp != self.__cpuStatsStamp)
+		# Save the instruction dump
+		self.__lineCpuStats[insnDumpMsg.lineNr] =\
+			CpuStatsEntry(self.__cpuStatsStamp,
+				      insnDumpMsg.stw,
+				      insnDumpMsg.accu1,
+				      insnDumpMsg.accu2)
 		# Update the stats widget
+		self.__cpuStatsCount += 1
 		if self.__cpuStatsCount >= self.__cpuStatsUpdate:
 			self.__cpuStatsCount = 0
 			self.__cpuStatsUpdate = 128
 			self.cpuStatsWidget.update()
 
-	def updateCpuStats_afterCycle(self, cpu):
-		if self.__cpuStatsEnabled:
+		# First instruction in cycle?
+		if insnDumpMsg.serial == 0:
+			# Update the 'obsolete'-flag based on the timestamp
+			for ent in self.__lineCpuStats.values():
+				ent.obsolete = (ent.stamp != self.__cpuStatsStamp)
+			# Advance the timestamp
 			self.__cpuStatsStamp += 1
+
+	def __pruneInvisibleCpuStats(self):
+		firstLine, lastLine = self.getVisibleLineRange()
+		for line, stats in self.__lineCpuStats.items():
+			if line < firstLine or line > lastLine:
+				stats.pruned = True
+				stats.obsolete = True
+
+	def __animation(self):
+		self.__hdrAniStat = (self.__hdrAniStat + 1) %\
+				    len(self.__aniChars)
+		self.headerWidget.update()
 
 	def __forwardWheelEvent(self, ev):
 		self.wheelEvent(ev)
@@ -207,12 +250,14 @@ class EditWidget(QPlainTextEdit):
 		while bcnt > 9:
 			digi, bcnt = digi + 1, bcnt // 10
 		digi += 1 # colon
-		return 5 + 5 + digi * self.__charWidth
+		metr = self.lineNumWidget.fontMetrics()
+		return 5 + 5 + metr.width("_" * digi)
 
 	def cpuStatsWidgetWidth(self):
 		if not self.__cpuStatsEnabled:
 			return 0
-		return 5 + 5 + CpuStatsEntry.getTextWidth() * self.__charWidth
+		metr = self.cpuStatsWidget.fontMetrics()
+		return 5 + 5 + metr.width(self.cpuStatsWidget.getBanner().replace(" ", "_"))
 
 	def headerHeight(self):
 		return 5 + 5 + self.__charHeight
@@ -268,6 +313,8 @@ class EditWidget(QPlainTextEdit):
 			self.headerWidget.scroll(0, dy)
 			self.lineNumWidget.scroll(0, dy)
 			self.cpuStatsWidget.scroll(0, dy)
+			self.__pruneInvisibleCpuStats()
+			self.visibleRangeChanged.emit()
 			return
 		self.headerWidget.update(0, rect.y(),
 			self.headerWidget.width(),
@@ -285,6 +332,12 @@ class EditWidget(QPlainTextEdit):
 		QPlainTextEdit.resizeEvent(self, ev)
 		self.__updateGeo()
 
+	__runStateToText = {
+		CpuWidget.STATE_STOP	: "-- CPU STOPPED --",
+		CpuWidget.STATE_INIT	: "Initializing simulator...",
+		CpuWidget.STATE_LOAD	: "Loading code...",
+	}
+
 	def __repaintHeaderWidget(self, ev):
 		p = self.headerWidget.getPainter()
 		p.fillRect(ev.rect(), Qt.lightGray)
@@ -292,14 +345,10 @@ class EditWidget(QPlainTextEdit):
 		if self.__runStateCopy == CpuWidget.STATE_RUN:
 			runText = self.__aniChars[self.__hdrAniStat]
 		else:
-			runText = {
-				CpuWidget.STATE_STOP:	"-- CPU STOPPED --",
-				CpuWidget.STATE_PARSE:	"Parsing code...",
-				CpuWidget.STATE_INIT:	"Initializing simulator...",
-				CpuWidget.STATE_LOAD:	"Loading code...",
-			}[self.__runStateCopy]
+			runText = self.__runStateToText[self.__runStateCopy]
+		metr = self.headerWidget.fontMetrics()
 		p.drawText(5, 5,
-			   self.__charWidth * len(runText) + 1,
+			   metr.width(runText.replace(" ", "_")),
 			   self.headerWidget.height(),
 			   Qt.AlignLeft,
 			   runText)
@@ -324,22 +373,12 @@ class EditWidget(QPlainTextEdit):
 		p.fillRect(rect, Qt.white)
 		p.setPen(Qt.black)
 
-		block = self.firstVisibleBlock()
-		bn = block.blockNumber()
-		top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
-		bottom = top + self.blockBoundingRect(block).height()
-
-		while block.isValid() and top <= ev.rect().bottom():
-			if block.isVisible() and bottom >= ev.rect().top():
-				p.drawText(-5, top,
-					   self.lineNumWidget.width(),
-					   self.__charHeight,
-					   Qt.AlignRight,
-					   str(bn + 1) + ':')
-			block = block.next()
-			top = bottom
-			bottom = top + self.blockBoundingRect(block).height()
-			bn += 1
+		for lineNr, yOffset in self.__eachVisibleLine():
+			p.drawText(-5, yOffset,
+				   self.lineNumWidget.width(),
+				   self.__charHeight,
+				   Qt.AlignRight,
+				   "%d:" % lineNr)
 
 	def __repaintCpuStatsWidget(self, ev):
 		p = self.cpuStatsWidget.getPainter()
@@ -348,27 +387,18 @@ class EditWidget(QPlainTextEdit):
 		rect.setWidth(3)
 		p.fillRect(rect, Qt.white)
 
-		block = self.firstVisibleBlock()
-		bn = block.blockNumber()
-		top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
-		bottom = top + self.blockBoundingRect(block).height()
-
-		while block.isValid() and top <= ev.rect().bottom():
-			statsEnt = self.__lineCpuStats.get(bn)
-			if statsEnt and block.isVisible() and bottom >= ev.rect().top():
+		for lineNr, yOffset in self.__eachVisibleLine():
+			statsEnt = self.__lineCpuStats.get(lineNr)
+			if statsEnt:
 				if statsEnt.obsolete:
 					p.setPen(Qt.darkGray)
 				else:
 					p.setPen(Qt.black)
-				p.drawText(5, top,
+				p.drawText(5, yOffset,
 					   self.cpuStatsWidget.width(),
 					   self.__charHeight,
 					   Qt.AlignLeft,
 					   str(statsEnt))
-			block = block.next()
-			top = bottom
-			bottom = top + self.blockBoundingRect(block).height()
-			bn += 1
 
 	def __textChanged(self):
 		self.__updateFonts()

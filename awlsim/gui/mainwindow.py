@@ -2,7 +2,7 @@
 #
 # AWL simulator - GUI main window
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -25,6 +25,9 @@ from awlsim.core.compat import *
 from awlsim.gui.util import *
 from awlsim.gui.editwidget import *
 from awlsim.gui.cpuconfig import *
+from awlsim.gui.coreconfig import *
+
+from awlsim.coreserver.client import *
 
 
 class MainWidget(QWidget):
@@ -35,8 +38,10 @@ class MainWidget(QWidget):
 		QWidget.__init__(self, parent)
 		self.setLayout(QGridLayout(self))
 
-		self.sim = AwlSim()
-		self.sim.getCPU().enableExtendedInsns(enableExtInstructions)
+		self.__initSim(enableExtInstructions)
+
+		self.cpuConfigDialog = CpuConfigDialog(self, self.simClient)
+		self.coreConfigDialog = CoreConfigDialog(self, self.simClient)
 
 		self.splitter = QSplitter(Qt.Horizontal)
 		self.layout().addWidget(self.splitter, 0, 0)
@@ -55,14 +60,18 @@ class MainWidget(QWidget):
 		self.cpuWidget.runStateChanged.connect(self.__runStateChanged)
 		self.runStateChanged.connect(self.codeEdit.runStateChanged)
 
+	def __initSim(self, enableExtInsns):
+		self.simClient = GuiAwlSimClient()
+		self.simClient.enableExtendedInsns(enableExtInsns)
+
 	def isDirty(self):
 		return self.dirty
 
 	def __runStateChanged(self, newState):
 		self.runStateChanged.emit(newState)
 
-	def getSim(self):
-		return self.sim
+	def getSimClient(self):
+		return self.simClient
 
 	def getCodeEditWidget(self):
 		return self.codeEdit
@@ -122,8 +131,10 @@ class MainWidget(QWidget):
 			return self.saveFile(self.filename)
 
 	def cpuConfig(self):
-		dlg = CpuConfigDialog(self, self.sim)
-		dlg.exec_()
+		self.cpuConfigDialog.exec_()
+
+	def coreConfig(self):
+		self.coreConfigDialog.exec_()
 
 class MainWindow(QMainWindow):
 	@classmethod
@@ -158,6 +169,7 @@ class MainWindow(QMainWindow):
 		self.menuBar().addMenu(menu)
 
 		menu = QMenu("&Simulator", self)
+		menu.addAction("&Awlsim core settings...", self.coreConfig)
 		menu.addAction("&CPU config...", self.cpuConfig)
 		self.menuBar().addMenu(menu)
 
@@ -181,8 +193,8 @@ class MainWindow(QMainWindow):
 	def runEventLoop(self):
 		return self.qApplication.exec_()
 
-	def getSim(self):
-		return self.centralWidget().getSim()
+	def getSimClient(self):
+		return self.centralWidget().getSimClient()
 
 	def cpuRun(self):
 		self.centralWidget().getCpuWidget().run()
@@ -231,7 +243,7 @@ class MainWindow(QMainWindow):
 	def about(self):
 		QMessageBox.information(self, "About S7 AWL/STL simulator",
 			"awlsim version %d.%d\n\n"
-			"Copyright 2012-2013 Michael Büsch <m@bues.ch>\n"
+			"Copyright 2012-2014 Michael Büsch <m@bues.ch>\n"
 			"Licensed under the terms of the "
 			"GNU GPL version 2 or (at your option) "
 			"any later version." %\
@@ -248,3 +260,6 @@ class MainWindow(QMainWindow):
 
 	def cpuConfig(self):
 		self.centralWidget().cpuConfig()
+
+	def coreConfig(self):
+		self.centralWidget().coreConfig()

@@ -35,6 +35,10 @@ def swapEndianDWord(dword):
 	       ((dword & 0x00FF0000) >> 8) |\
 	       ((dword & 0xFF000000) >> 24)
 
+# Round up integer 'n' to a multiple of integer 's'
+def round_up(n, s):
+	return ((n + s - 1) // s) * s
+
 def byteToSignedPyInt(byte):
 	if byte & 0x80:
 		return -((~byte + 1) & 0xFF)
@@ -168,6 +172,9 @@ class _WordPacker:
 	_wordStruct = struct.Struct(str(">H"))
 	_dwordStruct = struct.Struct(str(">I"))
 
+	def __fromBytes_1(self, buf, byteOffset):
+		return buf[byteOffset] & 0x01
+
 	def __fromBytes_8(self, buf, byteOffset):
 		return buf[byteOffset]
 
@@ -182,10 +189,14 @@ class _WordPacker:
 		)[0]
 
 	__fromBytesHandlers = {
+		1	: __fromBytes_1,
 		8	: __fromBytes_8,
 		16	: __fromBytes_16,
 		32	: __fromBytes_32,
 	}
+
+	def __toBytes_1(self, buf, byteOffset, value):
+		buf[byteOffset] = value & 0x01
 
 	def __toBytes_8(self, buf, byteOffset, value):
 		buf[byteOffset] = value & 0xFF
@@ -203,6 +214,7 @@ class _WordPacker:
 			_WordPacker._dwordStruct.pack(value & 0xFFFFFFFF)
 
 	__toBytesHandlers = {
+		1	: __toBytes_1,
 		8	: __toBytes_8,
 		16	: __toBytes_16,
 		32	: __toBytes_32,
@@ -212,14 +224,14 @@ class _WordPacker:
 		try:
 			handler = self.__fromBytesHandlers[bitWidth]
 			return handler(self, byteBuffer, byteOffset)
-		except (IndexError, struct.error) as e:
+		except (IndexError, KeyError, struct.error) as e:
 			raise AwlSimError("Failed to unpack %d bits from buffer" % bitWidth)
 
 	def toBytes(self, byteBuffer, bitWidth, byteOffset=0, value=0):
 		try:
 			handler = self.__toBytesHandlers[bitWidth]
 			handler(self, byteBuffer, byteOffset, value)
-		except (IndexError, struct.error) as e:
+		except (IndexError, KeyError, struct.error) as e:
 			raise AwlSimError("Failed to pack %d bits into buffer" % bitWidth)
 
 WordPacker = _WordPacker()

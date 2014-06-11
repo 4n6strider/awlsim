@@ -13,12 +13,30 @@ die()
 	exit 1
 }
 
+# $1=message
+test_failed()
+{
+	echo "=== TEST FAILED ==="
+	if [ $opt_softfail -eq 0 ]; then
+		die "$@"
+	else
+		echo "$*"
+		echo "^^^ TEST FAILED ^^^"
+	fi
+}
+
 cleanup()
 {
 	[ -f "$test_time_file" ] && {
 		rm -f "$test_time_file"
 		test_time_file=
 	}
+}
+
+cleanup_and_exit()
+{
+	cleanup
+	exit 1
 }
 
 # $1=interpreter
@@ -46,11 +64,13 @@ run_awl_test()
 
 	command time -o "$test_time_file" -f '%E' \
 	"$interpreter" "$rootdir/awlsimcli" --quiet --onecycle --extended-insns \
-		--hardware dummy:inputAddressBase=7:outputAddressBase=8:dummyParam=True \
+		--hardware debug:inputAddressBase=7:outputAddressBase=8:dummyParam=True \
 		--cycle-time 60 \
 		"$@" \
-		"$awl" ||\
-		die "Test failed"
+		"$awl" || {
+			test_failed "Test '$(basename "$awl")' FAILED"
+			return
+	}
 	echo "[OK: $(cat "$test_time_file")]"
 }
 
@@ -166,20 +186,40 @@ do_tests()
 	done
 }
 
-trap cleanup EXIT INT TERM
+show_help()
+{
+	echo "awlsim unit test script"
+	echo
+	echo "Usage: run.sh [OPTIONS] [testscript.awl/.sh]"
+	echo
+	echo "Options:"
+	echo " -i|--interpreter INTER        Use INTER as interpreter for the tests"
+	echo " -s|--softfail                 Do not abort on single test failures"
+}
+
+trap cleanup_and_exit INT TERM
+trap cleanup EXIT
 test_time_file="$(mktemp --tmpdir=/tmp awlsim-test-time.XXXXXX)"
 
 opt_interpreter=
+opt_softfail=0
 
 while [ $# -ge 1 ]; do
 	[ "$(echo "$1" | cut -c1)" != "-" ] && break
 
 	case "$1" in
+	-h|--help)
+		show_help
+		exit 0
+		;;
 	-i|--interpreter)
 		shift
 		opt_interpreter="$1"
 		which "$opt_interpreter" >/dev/null 2>&1 ||\
 			die "Interpreter '${opt_interpreter}' not found"
+		;;
+	-s|--softfail)
+		opt_softfail=1
 		;;
 	*)
 		echo "Unknown option: $1"

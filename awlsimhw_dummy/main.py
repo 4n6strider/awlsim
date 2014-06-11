@@ -2,7 +2,7 @@
 #
 # AWL simulator - Dummy hardware interface
 #
-# Copyright 2013 Michael Buesch <m@bues.ch>
+# Copyright 2013-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -30,11 +30,6 @@ from awlsim.core.datatypes import AwlOffset
 class HardwareInterface(AbstractHardwareInterface):
 	name = "dummy"
 
-	paramDescs = [
-		HwParamDesc_bool("dummyParam",
-				 description = "Unused dummy parameter"),
-	]
-
 	def __init__(self, sim, parameters={}):
 		AbstractHardwareInterface.__init__(self,
 						   sim = sim,
@@ -47,22 +42,10 @@ class HardwareInterface(AbstractHardwareInterface):
 		pass # Do nothing
 
 	def readInputs(self):
-		# Get the first input dword and write it back.
-		dword = self.sim.cpu.fetch(AwlOperator(AwlOperator.MEM_E,
-						       32,
-						       AwlOffset(self.inputAddressBase)))
-		dwordBytes = bytearray( ( ((dword >> 24) & 0xFF),
-					  ((dword >> 16) & 0xFF),
-					  ((dword >> 8) & 0xFF),
-					  (dword & 0xFF) ) )
-		self.sim.cpu.storeInputRange(self.inputAddressBase,
-					     dwordBytes)
+		pass # Do nothing
 
 	def writeOutputs(self):
-		# Fetch a data range, but don't do anything with it.
-		outData = self.sim.cpu.fetchOutputRange(self.outputAddressBase,
-							512)
-		assert(outData)
+		pass # Do nothing
 
 	def directReadInput(self, accessWidth, accessOffset):
 		if accessOffset < self.inputAddressBase:

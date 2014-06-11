@@ -2,7 +2,7 @@
 #
 # AWL simulator - System-blocks
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -27,12 +27,45 @@ from awlsim.core.blocks import *
 
 
 class SystemBlock(Block):
-	def __init__(self, cpu, index, interface):
+	# The block identification. To be overridden by the subclass.
+	# The tuple is: (number, name, short_description)
+	name = (-1, "<unknown>", None)
+
+	# Interface fields. To be overridden by the subclass.
+	interfaceFields = {
+		BlockInterfaceField.FTYPE_IN	: (),
+		BlockInterfaceField.FTYPE_OUT	: (),
+		BlockInterfaceField.FTYPE_INOUT	: (),
+		BlockInterfaceField.FTYPE_STAT	: (),
+	}
+
+	def __init__(self, cpu, interface):
 		insns = [
 			AwlInsn_GENERIC_CALL(cpu, self.run),
 		]
-		Block.__init__(self, insns, index, interface)
+		Block.__init__(self, insns, self.name[0], interface)
 		self.cpu = cpu
+
+		# Register the interface.
+		for ftype in (BlockInterfaceField.FTYPE_IN,
+			      BlockInterfaceField.FTYPE_OUT,
+			      BlockInterfaceField.FTYPE_INOUT,
+			      BlockInterfaceField.FTYPE_STAT):
+			try:
+				fields = self.interfaceFields[ftype]
+			except KeyError:
+				continue
+			for field in fields:
+				if ftype == BlockInterfaceField.FTYPE_IN:
+					self.interface.addField_IN(field)
+				elif ftype == BlockInterfaceField.FTYPE_OUT:
+					self.interface.addField_OUT(field)
+				elif ftype == BlockInterfaceField.FTYPE_INOUT:
+					self.interface.addField_INOUT(field)
+				elif ftype == BlockInterfaceField.FTYPE_STAT:
+					self.interface.addField_STAT(field)
+				else:
+					assert(0)
 
 	def run(self):
 		# Reimplement this method
@@ -50,7 +83,7 @@ class SystemBlock(Block):
 	# (i.e. accesses not done in AWL instructions)
 	def resolveHardwiredSymbols(self):
 		self.__interfaceOpers = {}
-		for field in self.interface.fields_IN_OUT_INOUT:
+		for field in self.interface.fields_IN_OUT_INOUT_STAT:
 			# Create a scratch-operator for the access.
 			oper = AwlOperator(AwlOperator.NAMED_LOCAL, 0,
 					   field.name)
@@ -64,8 +97,8 @@ class SFBInterface(FBInterface):
 	pass
 
 class SFB(SystemBlock):
-	def __init__(self, cpu, index):
-		SystemBlock.__init__(self, cpu, index, SFBInterface())
+	def __init__(self, cpu):
+		SystemBlock.__init__(self, cpu, SFBInterface())
 
 	def __repr__(self):
 		return "SFB %d" % self.index
@@ -74,8 +107,8 @@ class SFCInterface(FCInterface):
 	pass
 
 class SFC(SystemBlock):
-	def __init__(self, cpu, index):
-		SystemBlock.__init__(self, cpu, index, SFCInterface())
+	def __init__(self, cpu):
+		SystemBlock.__init__(self, cpu, SFCInterface())
 
 	def __repr__(self):
 		return "SFC %d" % self.index

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 #
-# AWL simulator - SFBs
+# AWL simulator - SFCs
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,19 +22,16 @@
 from __future__ import division, absolute_import, print_function, unicode_literals
 from awlsim.core.compat import *
 
-from awlsim.core.systemblocks import *
-from awlsim.core.util import *
+from awlsim.core.systemblocks.system_sfc_m3 import *
+from awlsim.core.systemblocks.system_sfc_m2 import *
+from awlsim.core.systemblocks.system_sfc_m1 import *
+from awlsim.core.systemblocks.system_sfc_64 import *
 
 
-class SFBm1(SFB):
-	"""SFB -1: __NOP"""
+SFC_table = {
+	-3	: SFCm3,	# __SHUTDOWN
+	-2	: SFCm2,	# __REBOOT
+	-1	: SFCm1,	# __NOP
 
-	def __init__(self, cpu):
-		SFB.__init__(self, cpu, -1)
-
-	def run(self):
-		pass # No operation
-
-SFB_table = {
-	-1	: SFBm1,
+	64	: SFC64,	# TIME_TCK
 }
