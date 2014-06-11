@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 #
-# AWL simulator - Dummy hardware interface
+# AWL simulator - TCP hardware interface
 #
 # Copyright 2013 Michael Buesch <m@bues.ch>
 #
@@ -19,37 +19,46 @@
 # 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
 
-from awlsim.hardware import *
-from awlsim.operators import AwlOperator
-from awlsim.datatypes import AwlOffset
+from __future__ import division, absolute_import, print_function, unicode_literals
+
+from awlsim.core.hardware import AbstractHardwareInterface, HwParamDesc_bool
+from awlsim.core.operators import AwlOperator
+from awlsim.core.datatypes import AwlOffset
+
+import threading
+import SocketServer
+
+
+class MyTCPHandler(SocketServer.BaseRequestHandler):
+    def handle(self):
+        self.data = self.request.recv(1024).strip()
+        print("{} wrote:".format(self.client_address[0]))
+        print(self.data)
+        self.request.sendall(self.data.upper())
 
 
 class HardwareInterface(AbstractHardwareInterface):
     name = "tcp"
 
     paramDescs = [
-        HwParamDesc_bool("test_param",
-                         description="Unused test parameter"),
+        HwParamDesc_bool("dummyParam", description="Unused dummy parameter"),
     ]
 
     def __init__(self, sim, parameters):
-        AbstractHardwareInterface.__init__(self,
-                                           sim=sim,
-                                           parameters=parameters)
+        AbstractHardwareInterface.__init__(self, sim=sim, parameters=parameters)
 
     def doStartup(self):
-        print "Hello TCP module"
-        pass  # Do nothing
+        server = SocketServer.TCPServer(('127.0.0.1', 5000), MyTCPHandler)
+        t = threading.Thread(target=server.serve_forever)
+        t.daemon = True
+        t.start()
 
     def doShutdown(self):
-        print self.directReadInput(1, 1)
-        pass  # Do nothing
+        pass
 
     def readInputs(self):
         # Get the first input dword and write it back.
-        dword = self.sim.cpu.fetch(AwlOperator(AwlOperator.MEM_E,
-                                               32,
-                                               AwlOffset(self.inputAddressBase)))
+        dword = self.sim.cpu.fetch(AwlOperator(AwlOperator.MEM_E, 32, AwlOffset(self.inputAddressBase)))
         dwordBytes = bytearray((((dword >> 24) & 0xFF),
                                 ((dword >> 16) & 0xFF),
                                 ((dword >> 8) & 0xFF),
@@ -65,9 +74,7 @@ class HardwareInterface(AbstractHardwareInterface):
         if accessOffset < self.inputAddressBase:
             return None
         # Just read the current value from the CPU and return it.
-        return self.sim.cpu.fetch(AwlOperator(AwlOperator.MEM_E,
-                                              accessWidth,
-                                              AwlOffset(accessOffset)))
+        return self.sim.cpu.fetch(AwlOperator(AwlOperator.MEM_E, accessWidth, AwlOffset(accessOffset)))
 
     def directWriteOutput(self, accessWidth, accessOffset, data):
         if accessOffset < self.outputAddressBase:
