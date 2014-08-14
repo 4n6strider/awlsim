@@ -2,7 +2,7 @@
 #
 # AWL simulator - operators
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,13 +22,14 @@
 from __future__ import division, absolute_import, print_function, unicode_literals
 from awlsim.core.compat import *
 
+from awlsim.core.dynattrs import *
 from awlsim.core.datatypes import *
 from awlsim.core.statusword import *
 from awlsim.core.lstack import *
 from awlsim.core.util import *
 
 
-class AwlOperator(object):
+class AwlOperator(DynAttrs):
 	EnumGen.start	# Operator types
 
 	IMM		= EnumGen.item	# Immediate value (constant)
@@ -82,6 +83,7 @@ class AwlOperator(object):
 	SYMBOLIC	= EnumGen.item	# Classic symbolic reference ("xyz")
 	NAMED_LOCAL	= EnumGen.item	# Named local reference (#abc)
 	NAMED_LOCAL_PTR	= EnumGen.item	# Pointer to named local (P##abc)
+	NAMED_DBVAR	= EnumGen.item	# Named DB variable reference (DBx.VAR)
 
 	INDIRECT	= EnumGen.item	# Indirect access
 	UNSPEC		= EnumGen.item	# Not (yet) specified memory region
@@ -144,8 +146,6 @@ class AwlOperator(object):
 		BLKREF_OB	: "BLOCK_OB",
 		BLKREF_VAT	: "BLOCK_VAT",
 
-		NAMED_LOCAL	: "#LOCAL",
-
 		INDIRECT	: "__INDIRECT",
 
 		VIRT_ACCU	: "__ACCU",
@@ -153,18 +153,26 @@ class AwlOperator(object):
 		VIRT_DBR	: "__DBR",
 	}
 
+	# Dynamic attributes
+	dynAttrs = {
+		# Extended-operator flag.
+		"isExtended"		: False,
+
+		# Possible label index.
+		"labelIndex"		: None,
+
+		# Interface index number.
+		# May be set by the symbol resolver.
+		"interfaceIndex"	: None,
+	}
+
 	def __init__(self, type, width, value, insn=None):
 		# type -> The operator type ID number. See "Operator types" above.
 		# width -> The bit width of the access.
 		# value -> The value. May be an AwlOffset or a string (depends on type).
 		# insn -> The instruction this operator is used in. May be None.
-		self.type = type
-		self.width = width
-		self.value = value
-		self.labelIndex = None
-		self.insn = insn
-		self.isExtended = False
-		# The symbol resolver may also put a "self.interfaceIndex" number in here.
+		self.type, self.width, self.value, self.insn =\
+			type, width, value, insn
 
 	# Make a deep copy, except for "insn".
 	def dup(self):
@@ -178,6 +186,7 @@ class AwlOperator(object):
 				   insn = self.insn)
 		oper.setExtended(self.isExtended)
 		oper.setLabelIndex(self.labelIndex)
+		oper.interfaceIndex = self.interfaceIndex
 		return oper
 
 	def setInsn(self, newInsn):
@@ -243,9 +252,10 @@ class AwlOperator(object):
 		if self.type == self.IMM_REAL:
 			return str(dwordToPyFloat(self.value))
 		elif self.type == self.IMM_S5T:
-			return "S5T#" #TODO
+			seconds = Timer.s5t_to_seconds(self.value)
+			return "S5T#" + AwlDataType.formatTime(seconds)
 		elif self.type == self.IMM_TIME:
-			return "T#" #TODO
+			return "T#" + AwlDataType.formatTime(self.value / 1000.0)
 		elif self.type == self.IMM_DATE:
 			return "D#" #TODO
 		elif self.type == self.IMM_TOD:
@@ -327,11 +337,13 @@ class AwlOperator(object):
 		elif self.type == self.BLKREF_VAT:
 			return "VAT %d" % self.value.byteOffset
 		elif self.type == self.SYMBOLIC:
-			return '"%s"' % self.value
+			return '"%s"' % self.value.varName
 		elif self.type == self.NAMED_LOCAL:
-			return "#%s" % self.value
+			return "#%s" % self.value.varName
 		elif self.type == self.NAMED_LOCAL_PTR:
-			return "P##%s" % self.value
+			return "P##%s" % self.value.varName
+		elif self.type == self.NAMED_DBVAR:
+			return str(self.value) # value is AwlOffset
 		elif self.type == self.INDIRECT:
 			assert(0) # Overloaded in AwlIndirectOp
 		elif self.type == self.VIRT_ACCU:
@@ -352,9 +364,6 @@ class AwlIndirectOp(AwlOperator):
 	AR_NONE		= 0	# No address register
 	AR_1		= 1	# Use AR1
 	AR_2		= 2	# Use AR2
-
-	# Address area mask
-	ADDRESS_MASK	= 0x0000FFFFFF #FIXME should be 0x7FFFF
 
 	# Pointer area constants
 	AREA_SHIFT	= 24
@@ -426,10 +435,8 @@ class AwlIndirectOp(AwlOperator):
 				     width = width,
 				     value = None,
 				     insn = insn)
-		assert(width in (1, 8, 16, 32))
-		self.area = area
-		self.addressRegister = addressRegister
-		self.offsetOper = offsetOper
+		self.area, self.addressRegister, self.offsetOper =\
+			area, addressRegister, offsetOper
 
 	# Make a deep copy, except for "insn".
 	def dup(self):
@@ -483,14 +490,14 @@ class AwlIndirectOp(AwlOperator):
 					"access is not of %s bit width." %\
 					listToHumanStr(possibleWidths))
 			offsetValue = self.insn.cpu.fetch(offsetOper)
-			pointer = (self.area | (offsetValue & 0x00FFFFFF))
+			pointer = (self.area | (offsetValue & 0x0007FFFF))
 		else:
 			# Register-indirect access
 			if offsetOper.type != AwlOperator.IMM_PTR:
 				raise AwlSimError("Offset operator in "
 					"register-indirect access is not a "
 					"pointer immediate.")
-			offsetValue = self.insn.cpu.fetch(offsetOper)
+			offsetValue = self.insn.cpu.fetch(offsetOper) & 0x0007FFFF
 			if self.area == AwlIndirectOp.AREA_NONE:
 				# Area-spanning access
 				pointer = (self.insn.cpu.getAR(self.addressRegister).get() +\
@@ -498,7 +505,7 @@ class AwlIndirectOp(AwlOperator):
 			else:
 				# Area-internal access
 				pointer = ((self.insn.cpu.getAR(self.addressRegister).get() +
-					    offsetValue) & 0x00FFFFFF) |\
+					    offsetValue) & 0x0007FFFF) |\
 					  self.area
 		# Create a direct operator
 		try:
@@ -517,7 +524,7 @@ class AwlIndirectOp(AwlOperator):
 			directOffset = AwlOffset.fromPointerValue(pointer)
 		else:
 			# 'pointer' is a byte offset
-			directOffset = AwlOffset(pointer & AwlIndirectOp.ADDRESS_MASK)
+			directOffset = AwlOffset(pointer & 0x0000FFFF)
 		if self.width != 1 and directOffset.bitOffset:
 			raise AwlSimError("Bit offset (lowest three bits) in %d-bit "
 				"indirect addressing is not zero. "
@@ -528,7 +535,7 @@ class AwlIndirectOp(AwlOperator):
 	def makePointer(self):
 		# This is a programming error.
 		# The caller should resolve() the operator first.
-		raise AwlSimError("BUG: Can not transform indirect operator "
+		raise AwlSimBug("Can not transform indirect operator "
 			"into a pointer. Resolve it first.")
 
 	def __repr__(self):

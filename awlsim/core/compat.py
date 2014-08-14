@@ -20,9 +20,9 @@
 #
 
 from __future__ import division, absolute_import, print_function, unicode_literals
-from awlsim.core.compat import *
 
 import sys
+import os
 
 
 # isPyPy is True, if the interpreter is PyPy.
@@ -33,6 +33,11 @@ isJython = sys.platform.lower().startswith("java")
 
 # isIronPython is True, if the interpreter is IronPython
 isIronPython = "IronPython" in sys.version
+
+# isWinStandalone is True, if this is a Windows standalone package (py2exe)
+isWinStandalone = os.name == "nt" and\
+		  (sys.executable.endswith("awlsimgui.exe") or\
+		   sys.executable.endswith("awlsimcli.exe"))
 
 # isPy3Compat is True, if the interpreter is Python 3 compatible.
 isPy3Compat = sys.version_info[0] == 3
@@ -58,6 +63,11 @@ if isPy2Compat:
 if isPy2Compat:
 	range = xrange
 
+# reduce() compatibility.
+# Force Python2 behavior
+if isPy3Compat:
+	from functools import reduce
+
 # Compat wrapper for monotonic time
 import time
 monotonic_time = getattr(time, "monotonic", time.clock)
@@ -67,3 +77,11 @@ try:
 	BlockingIOError
 except NameError:
 	class BlockingIOError(object): pass
+
+# Import StringIO
+if isIronPython and isPy2Compat:
+	# XXX: Workaround for IronPython's buggy io.StringIO
+	from StringIO import StringIO
+else:
+	from io import StringIO
+from io import BytesIO

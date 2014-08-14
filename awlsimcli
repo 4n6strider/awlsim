@@ -45,12 +45,13 @@ def usage():
 	printInfo("Options:")
 	printInfo(" -1|--onecycle         Only run one cycle")
 	printInfo(" -C|--cycle-limit SEC  Cycle time limit, in seconds (default 5.0)")
-	printInfo(" -4|--fouraccu         Enable 4-accu mode")
+	printInfo(" -2|--twoaccu          Force 2-accu mode")
+	printInfo(" -4|--fouraccu         Force 4-accu mode")
 	printInfo(" -D|--no-cpu-dump      Do not show CPU status while running")
 	printInfo(" -q|--quiet            Do not show any status messages")
 	printInfo(" -x|--extended-insns   Enable extended instructions")
 	printInfo(" -t|--obtemp 1/0       Enable/disable writing of OB-temp variables (Default: off)")
-	printInfo(" -m|--mnemonics auto   Mnemonics type: en, de, auto (default)")
+	printInfo(" -m|--mnemonics auto   Force mnemonics type: en, de, auto")
 	printInfo(" -P|--profile 0        Set profiling level (Default: 0)")
 	printInfo("")
 	printInfo("Server backend related options:")
@@ -68,11 +69,15 @@ def usage():
 	printInfo("")
 	printInfo("Other options:")
 	printInfo(" --list-sfc            Print a list of all supported SFCs")
+	printInfo(" --list-sfc-verbose    Verbose SFC list")
 	printInfo(" --list-sfb            Print a list of all supported SFBs")
+	printInfo(" --list-sfb-verbose    Verbose SFB list")
 
-def printSysblockInfo(blockTable, prefix, withExtended):
+def printSysblockInfo(blockTable, prefix, withExtended, withInterface):
 	for block in sorted(blockTable.values(),
 			    key = lambda b: b.name[0]):
+		if block.broken:
+			continue
 		number, name, desc = block.name
 		if number < 0 and not withExtended:
 			continue
@@ -81,6 +86,17 @@ def printSysblockInfo(blockTable, prefix, withExtended):
 		else:
 			desc = ""
 		printInfo("  %s %d  \"%s\"%s" % (prefix, number, name, desc))
+		if withInterface:
+			for ftype in (BlockInterfaceField.FTYPE_IN,
+				      BlockInterfaceField.FTYPE_OUT,
+				      BlockInterfaceField.FTYPE_INOUT):
+				try:
+					fields = block.interfaceFields[ftype]
+				except KeyError:
+					continue
+				for field in fields:
+					field.fieldType = ftype
+					printInfo("        %s" % str(field))
 
 def writeStdout(message):
 	if not opt_quiet:
@@ -114,17 +130,21 @@ def cpuDumpCallback(cpu):
 def makeLoglevel():
 	return Logging.LOG_ERROR if opt_quiet else Logging.LOG_INFO
 
-def assignCpuSpecs(specs):
-	specs.setConfiguredMnemonics(opt_mnemonics)
-	specs.setNrAccus(4 if opt_fouraccu else 2)
+def assignCpuSpecs(cpuSpecs, projectCpuSpecs):
+	cpuSpecs.assignFrom(projectCpuSpecs)
+	if opt_mnemonics is not None:
+		cpuSpecs.setConfiguredMnemonics(opt_mnemonics)
+	if opt_nrAccus is not None:
+		cpuSpecs.setNrAccus(opt_nrAccus)
 
 def readInputFile(inputFile):
 	if Project.fileIsProject(inputFile):
 		project = Project.fromFile(inputFile)
 	else:
 		# make a fake project
+		awlSrc = AwlSource.fromFile(inputFile, inputFile)
 		project = Project(projectFile = None,
-				  awlFiles = [ inputFile, ])
+				  awlSources = [ awlSrc, ])
 	return project
 
 def run(inputFile):
@@ -139,15 +159,18 @@ def run(inputFile):
 
 		writeStdout("Parsing code...\n")
 		parseTrees = []
-		for awlFile in project.awlFiles:
+		for awlSrc in project.awlSources:
 			p = AwlParser()
-			p.parseFile(awlFile)
+			p.parseSource(awlSrc)
 			parseTrees.append(p.getParseTree())
 		symTables = []
-		for symTabFile in project.symTabFiles:
-			tab = SymTabParser.parseFile(symTabFile,
-						     autodetectFormat = True,
-						     mnemonics = opt_mnemonics)
+		for symTabSrc in project.symTabSources:
+			mnemonics = project.cpuSpecs.getConfiguredMnemonics()
+			if opt_mnemonics is not None:
+				mnemonics = opt_mnemonics
+			tab = SymTabParser.parseSource(symTabSrc,
+						       autodetectFormat = True,
+						       mnemonics = mnemonics)
 			symTables.append(tab)
 
 		writeStdout("Initializing simulator...\n")
@@ -162,7 +185,7 @@ def run(inputFile):
 						parameters = parameters)
 
 		cpu = s.getCPU()
-		assignCpuSpecs(cpu.getSpecs())
+		assignCpuSpecs(cpu.getSpecs(), project.cpuSpecs)
 		cpu.enableObTempPresets(opt_obtemp)
 		cpu.enableExtendedInsns(opt_extInsns)
 		if not opt_noCpuDump and not opt_quiet:
@@ -253,15 +276,15 @@ def runWithServerBackend(inputFile):
 		client.enableExtendedInsns(opt_extInsns)
 		client.setCycleTimeLimit(opt_cycletime)
 		specs = client.getCpuSpecs()
-		assignCpuSpecs(specs)
+		assignCpuSpecs(specs, project.cpuSpecs)
 		client.setCpuSpecs(specs)
 
 		# Fire up the core
 		writeStdout("Initializing CPU...\n")
-		for symTabFile in project.symTabFiles:
-			client.loadSymbolTable(awlFileRead(symTabFile))
-		for awlFile in project.awlFiles:
-			client.loadCode(awlFileRead(awlFile))
+		for symTabSrc in project.symTabSources:
+			client.loadSymbolTable(symTabSrc)
+		for awlSrc in project.awlSources:
+			client.loadCode(awlSrc)
 		client.setRunState(True)
 
 		# Run the client-side event loop
@@ -301,7 +324,7 @@ def main():
 	global opt_cycletime
 	global opt_quiet
 	global opt_noCpuDump
-	global opt_fouraccu
+	global opt_nrAccus
 	global opt_extInsns
 	global opt_obtemp
 	global opt_mnemonics
@@ -316,10 +339,10 @@ def main():
 	opt_cycletime = 5.0
 	opt_quiet = False
 	opt_noCpuDump = False
-	opt_fouraccu = False
+	opt_nrAccus = None
 	opt_extInsns = False
 	opt_obtemp = False
-	opt_mnemonics = "auto"
+	opt_mnemonics = None
 	opt_hwmods = []
 	opt_hwinfos = []
 	opt_profile = 0
@@ -329,13 +352,14 @@ def main():
 
 	try:
 		(opts, args) = getopt.getopt(sys.argv[1:],
-			"h1C:4qDxt:m:H:I:P:c:bi:",
-			[ "help", "onecycle", "cycle-time=", "fouraccu",
+			"h1C:24qDxt:m:H:I:P:c:bi:",
+			[ "help", "onecycle", "cycle-time=", "twoaccu", "fouraccu",
 			  "quiet", "no-cpu-dump", "extended-insns",
 			  "obtemp=", "mnemonics=",
 			  "hardware=", "hardware-info=", "profile=",
 			  "connect=", "spawn-backend", "interpreter=",
-			  "list-sfc", "list-sfb", ])
+			  "list-sfc", "list-sfc-verbose",
+			  "list-sfb", "list-sfb-verbose", ])
 	except getopt.GetoptError as e:
 		printError(str(e))
 		usage()
@@ -352,8 +376,10 @@ def main():
 			except ValueError:
 				printError("-C|--cycle-time: Invalid time format")
 				sys.exit(1)
+		if o in ("-2", "--twoaccu"):
+			opt_nrAccus = 2
 		if o in ("-4", "--fouraccu"):
-			opt_fouraccu = True
+			opt_nrAccus = 4
 		if o in ("-q", "--quiet"):
 			opt_quiet = True
 		if o in ("-D", "--no-cpu-dump"):
@@ -409,13 +435,15 @@ def main():
 			opt_spawnBackend = True
 		if o in ("-i", "--interpreter"):
 			opt_interpreter = v
-		if o == "--list-sfc":
+		if o in ("--list-sfc", "--list-sfc-verbose"):
 			printInfo("The supported system functions (SFCs) are:")
-			printSysblockInfo(SFC_table, "SFC", opt_extInsns)
+			printSysblockInfo(SFC_table, "SFC", opt_extInsns,
+					  o.endswith("verbose"))
 			return 0
-		if o == "--list-sfb":
+		if o in ("--list-sfb", "--list-sfb-verbose"):
 			printInfo("The supported system function blocks (SFBs) are:")
-			printSysblockInfo(SFB_table, "SFB", opt_extInsns)
+			printSysblockInfo(SFB_table, "SFB", opt_extInsns,
+					  o.endswith("verbose"))
 			return 0
 	if len(args) != 1 and not opt_hwinfos:
 		usage()
@@ -426,6 +454,7 @@ def main():
 	Logging.setLoglevel(makeLoglevel())
 
 	opt_mnemonics = {
+		None	: None,
 		"en"	: S7CPUSpecs.MNEMONICS_EN,
 		"de"	: S7CPUSpecs.MNEMONICS_DE,
 		"auto"	: S7CPUSpecs.MNEMONICS_AUTO,

@@ -2,7 +2,7 @@
 #
 # AWL parser
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -26,6 +26,8 @@ import sys
 import re
 
 from awlsim.core.util import *
+from awlsim.core.datatypes import *
+from awlsim.core.project import *
 
 
 class RawAwlInsn(object):
@@ -119,12 +121,13 @@ class RawAwlBlock(object):
 class RawAwlCodeBlock(RawAwlBlock):
 	def __init__(self, tree, index):
 		RawAwlBlock.__init__(self, tree, index)
-		self.insns = []
-		self.vars_in = []
-		self.vars_out = []
-		self.vars_inout = []
-		self.vars_static = []
-		self.vars_temp = []
+		self.insns = []		# List of RawAwlInsn()s
+		# The block interface
+		self.vars_in = []	# List of RawAwlDataField()s for IN vars
+		self.vars_out = []	# List of RawAwlDataField()s for OUT vars
+		self.vars_inout = []	# List of RawAwlDataField()s for IN_OUT vars
+		self.vars_static = []	# List of RawAwlDataField()s for STATIC vars
+		self.vars_temp = []	# List of RawAwlDataField()s for TEMP vars
 		self.retTypeTokens = None
 
 	def hasLabel(self, string):
@@ -134,11 +137,59 @@ class RawAwlCodeBlock(RawAwlBlock):
 					return True
 		return False
 
-class RawAwlDataField(object):
-	def __init__(self, name, valueTokens, typeTokens):
-		self.name = name
+class RawAwlDataIdent(object):
+	def __init__(self, name, indices=None):
+		self.name = name	# Name string of the variable
+		self.indices = indices	# Possible array indices (or None)
+
+	def __eq__(self, other):
+		if self.name != other.name:
+			return False
+		if self.indices and other.indices:
+			if self.indices != other.indices:
+				return False
+		return True
+
+	def __ne__(self, other):
+		return not self.__eq__(other)
+
+	def __repr__(self):
+		if self.indices:
+			return "%s[%s]" % (self.name,
+					   ",".join(str(i) for i in self.indices))
+		return self.name
+
+class RawAwlDataInit(object):
+	def __init__(self, idents, valueTokens):
+		"""idents -> The identifications for the data field.
+		valueTokens -> List of tokens for the value.
+		"""
+		self.idents = toList(idents)
 		self.valueTokens = valueTokens
+
+	def getIdentString(self):
+		return ".".join(str(ident) for ident in self.idents)
+
+	def __repr__(self):
+		return self.getIdentString() + " := " + str(self.valueTokens)
+
+class RawAwlDataField(object):
+	def __init__(self, idents, typeTokens, dimensions=None, inits=None):
+		"""idents -> The identifications for the data field.
+		typeTokens -> List of tokens for the data type.
+		dimensions -> List of array dimensions, where each dimension is a
+		              tuple of (start, end). Or None, if this is not an array.
+		inits -> List of RawAwlDataInit()s"""
+		self.idents = toList(idents)
 		self.typeTokens = typeTokens
+		self.dimensions = dimensions
+		self.inits = inits if inits else []	# List of RawAwlDataInit()s
+
+	def getIdentString(self):
+		return ".".join(str(ident) for ident in self.idents)
+
+	def __repr__(self):
+		return self.getIdentString()
 
 class RawAwlDB(RawAwlBlock):
 	class FBRef(object):
@@ -149,17 +200,49 @@ class RawAwlDB(RawAwlBlock):
 
 	def __init__(self, tree, index):
 		RawAwlBlock.__init__(self, tree, index)
-		self.fields = []
 		self.fb = None
+
+		# Data fields and initializations.
+		# fieldInits are the inits from the DB init section.
+		# The inits from the DB declaration section are in fields[x].inits.
+		self.fields = []
+		self.fieldInits = []	# List of RawAwlDataInit()s
+
+	def getField(self, idents):
+		try:
+			return [f for f in self.fields if f.idents == idents][0]
+		except IndexError as e:
+			return None
+
+	def addFieldInit(self, fieldInit):
+		self.fieldInits.append(fieldInit)
+
+	def getFieldInit(self, field):
+		"""Returns the RawAwlDataInit() for the specified RawAwlDataField()"""
+		for otherField, init in self.allFieldInits():
+			if field.idents == init.idents:
+				return init
+		return None
+
+	def allFieldInits(self):
+		"""Returns a list (generator) of all RawAwlDataInits()"""
+		# First all explicit field initializations
+		for init in self.fieldInits:
+			yield self.getField(init.idents), init
+		# Then all field initializations from the declaration,
+		# that we did not initialize, yet.
+		for field in self.fields:
+			for init in field.inits:
+				for otherInit in self.fieldInits:
+					if init.idents == otherInit.idents:
+						# We already had an init for this field.
+						break
+				else:
+					# We did not have this init, yet.
+					yield field, init
 
 	def isInstanceDB(self):
 		return bool(self.fb)
-
-	def getByName(self, name):
-		for field in self.fields:
-			if field.name == name:
-				return field
-		return None
 
 class RawAwlOB(RawAwlCodeBlock):
 	def __init__(self, tree, index):
@@ -182,6 +265,8 @@ class AwlParseTree(object):
 		self.obs = {}
 
 		self.curBlock = None
+
+		self.fileId = ""
 
 class AwlParser(object):
 	EnumGen.start
@@ -209,6 +294,8 @@ class AwlParser(object):
 	STATE_IN_OB_HDR_ATTR		= EnumGen.item
 	STATE_IN_OB			= EnumGen.item
 	EnumGen.end
+
+	TEXT_ENCODING = "latin_1"
 
 	class TokenizerState(object):
 		def __init__(self, parser):
@@ -265,12 +352,14 @@ class AwlParser(object):
 		return self.__inAnyHeader() or\
 		       self.state == self.STATE_GLOBAL
 
-	def __tokenize(self, data):
+	def __tokenize(self, data, fileId):
 		self.reset()
+		self.tree.fileId = fileId
 		self.lineNr = 1
 
 		t = self.TokenizerState(self)
 		for i, c in enumerate(data):
+			cNext = data[i + 1] if i + 1 < len(data) else None
 			if c == '\n':
 				self.lineNr += 1
 			if t.inComment:
@@ -309,6 +398,7 @@ class AwlParser(object):
 				t.finishCurToken()
 				continue
 			if t.tokens:
+				# This is not the first token of the statement.
 				if (c == '(' and t.tokens[0].endswith(':') and len(t.tokens) >= 2) or\
 				   (c == '(' and not t.tokens[0].endswith(':')):
 					# Parenthesis begin
@@ -327,6 +417,24 @@ class AwlParser(object):
 				   c in (',', '[', ']') or\
 				   (c == '=' and len(t.tokens) == 1 and not t.curToken):
 					# Handle non-space token separators.
+					if c == ':' and cNext == '=':
+						# We are at the 'colon' character of a ':=' assignment.
+						t.finishCurToken()
+						t.addCharacter(c)
+					elif c == '=' and t.curToken == ':':
+						# We are at the 'equal' character of a ':=' assignment.
+						t.addCharacter(c)
+						t.finishCurToken()
+					else:
+						# Any other non-space token separator.
+						t.finishCurToken()
+						t.addToken(c)
+					continue
+			else:
+				# This is the first token of the statement.
+				if c == '[':
+					# This is the start of an array subscript.
+					# Handle it as separator.
 					t.finishCurToken()
 					t.addToken(c)
 					continue
@@ -539,6 +647,16 @@ class AwlParser(object):
 		else:
 			raise AwlParserError("In DB header: Unknown token: %s" % name)
 
+	def __parseArrayInitializer(self, name, initsList, tokens):
+		"""Parse an ARRAY initializer. That is either of:
+		1, 2, 3, 4
+		4 (1, 2, 3, 4)
+		or similar.
+		name -> The name string of the variable.
+		initsList -> The result list. Each element is a RawAwlDataInit().
+		tokens -> The tokens to parse."""
+		pass#TODO
+
 	def __parse_var_generic(self, t, varList,
 				endToken,
 				mayHaveInitval=True):
@@ -546,42 +664,141 @@ class AwlParser(object):
 			return False
 		colonIdx = listIndex(t.tokens, ":")
 		assignIdx = listIndex(t.tokens, ":=")
-		if mayHaveInitval and colonIdx == 1 and assignIdx > colonIdx + 1:
+		initsList = []
+		if len(t.tokens) >= 10 and\
+		   colonIdx == 1 and t.tokens[colonIdx+1].upper() == "ARRAY":
+			# This is an array variable.
+			ofIdx = listIndex(t.tokens, "OF",
+					  translate=lambda i, v: v.upper())
+			if assignIdx >= 0:
+				# We have an array initializer.
+				if not mayHaveInitval:
+					raise AwlParserError("In variable section: "
+						"Invalid ARRAY initializer")
+				if assignIdx < ofIdx + 2:
+					raise AwlParserError("In variable section: "
+						"Invalid ARRAY initializer placement")
+			if t.tokens[colonIdx+2] != "[":
+				raise AwlParserError("In variable section: "
+					"Invalid ARRAY definition")
+			closeIdx = listIndex(t.tokens, "]")
+			if closeIdx < colonIdx + 6 or\
+			   ofIdx < colonIdx + 7 or\
+			   closeIdx + 1 != ofIdx:
+				raise AwlParserError("In variable section: "
+					"Invalid ARRAY definition")
+			dimTokens = t.tokens[colonIdx+3 : closeIdx]
+			dimensions = []
+			while dimTokens:
+				if len(dimTokens) < 3:
+					raise AwlParserError("In variable section: "
+						"Invalid ARRAY dimensions")
+				if dimTokens[1] != "..":
+					raise AwlParserError("In variable section: "
+						"Invalid ARRAY dimensions")
+				try:
+					dimensions.append( (int(dimTokens[0]),
+							    int(dimTokens[2])) )
+				except ValueError as e:
+					raise AwlParserError("In variable section: "
+						"Invalid ARRAY dimensions")
+				if dimensions[-1][0] > dimensions[-1][1]:
+					raise AwlParserError("In variable section: "
+						"ARRAY dimension error. "
+						"Start bigger than end.")
+				if len(dimensions) > 6:
+					raise AwlParserError("In variable section: "
+						"Too many dimensions in ARRAY (max 6)")
+				dimTokens = dimTokens[3:]
+				if dimTokens and dimTokens[0] == ",":
+					dimTokens = dimTokens[1:]
 			name = t.tokens[0]
-			type = t.tokens[colonIdx+1:assignIdx]
-			val = t.tokens[assignIdx+1:]
-			field = RawAwlDataField(name, val, type)
-			varList.append(field)
-		elif colonIdx == 1:
-			name = t.tokens[0]
-			type = t.tokens[colonIdx+1:]
-			field = RawAwlDataField(name, None, type)
-			varList.append(field)
+			if assignIdx >= 0:
+				type = t.tokens[ofIdx+1:assignIdx]
+			else:
+				type = t.tokens[ofIdx+1:]
+			nrElems = AwlDataType.arrayDimensionsToNrElements(dimensions)
+			if assignIdx >= 0:
+				# Parse the ARRAY initializer (:= ...)
+				initTokens = t.tokens[assignIdx+1:]
+				self.__parseArrayInitializer(name,
+							     initsList,
+							     initTokens)
 		else:
-			raise AwlParserError("In variable section: Unknown tokens")
+			# This is a normal non-array variable.
+			dimensions = None
+			if mayHaveInitval and colonIdx == 1 and assignIdx > colonIdx + 1:
+				name = t.tokens[0]
+				type = t.tokens[colonIdx+1:assignIdx]
+				initTokens = t.tokens[assignIdx+1:]
+				initsList.append(RawAwlDataInit(RawAwlDataIdent(name),
+								initTokens))
+			elif colonIdx == 1:
+				name = t.tokens[0]
+				type = t.tokens[colonIdx+1:]
+			else:
+				raise AwlParserError("In variable section: Unknown tokens")
+		field = RawAwlDataField(idents = RawAwlDataIdent(name),
+					typeTokens = type,
+					dimensions = dimensions,
+					inits = initsList)
+		varList.append(field)
+
 		return True
 
 	def __parseTokens_db_hdr_struct(self, t):
 		if not self.__parse_var_generic(t,
 				varList = self.tree.curBlock.fields,
-				endToken = "END_STRUCT",
-				mayHaveInitval = False):
+				endToken = "END_STRUCT"):
 			self.__setState(self.STATE_IN_DB_HDR)
 
 	def __parseTokens_db(self, t):
 		if t.tokens[0].upper() == "END_DATA_BLOCK":
 			self.__setState(self.STATE_GLOBAL)
 			return
-		if len(t.tokens) >= 3 and t.tokens[1] == ":=":
+		if len(t.tokens) >= 6 and t.tokens[1] == "[":
+			# Array subscript assignment
+			name = t.tokens[0]
+			db = self.tree.curBlock
+			closeIdx = listIndex(t.tokens, "]", 2)
+			assignIdx = listIndex(t.tokens, ":=", closeIdx + 1)
+			if closeIdx < 0:
+				raise AwlParserError("Array assignment: "
+					"Missing closing braces")
+			if assignIdx < 0 or\
+			   assignIdx != closeIdx + 1:
+				raise AwlParserError("Array assignment: "
+					"Invalid value assignment")
+			indexTokens = t.tokens[2:closeIdx]
+			valueTokens = t.tokens[assignIdx+1:]
+			# Parse the array indices
+			indices = []
+			while indexTokens:
+				try:
+					indices.append(int(indexTokens[0]))
+				except ValueError as e:
+					raise AwlParserError("Array assignment: "
+						"Invalid index value")
+				indexTokens = indexTokens[1:]
+				if indexTokens:
+					if indexTokens[0] != ",":
+						raise AwlParserError("Array assignment: "
+							"Expected comma")
+					indexTokens = indexTokens[1:]
+			if not indices:
+				raise AwlParserError("Array assignment: "
+					"Invalid indices")
+			if len(indices) > 6:
+				raise AwlParserError("Array assignment: "
+					"More than 6 indices specified")
+			db.addFieldInit(RawAwlDataInit(RawAwlDataIdent(name, indices),
+						       valueTokens))
+		elif len(t.tokens) >= 3 and t.tokens[1] == ":=":
+			# Variable assignment
 			name, valueTokens = t.tokens[0], t.tokens[2:]
 			db = self.tree.curBlock
-			field = db.getByName(name)
-			if field:
-				field.valueTokens = valueTokens
-			else:
-				field = RawAwlDataField(name, valueTokens,
-							None)
-				db.fields.append(field)
+			db.addFieldInit(RawAwlDataInit(RawAwlDataIdent(name),
+						       valueTokens))
 		else:
 			raise AwlParserError("In DB: Unknown tokens")
 
@@ -755,16 +972,25 @@ class AwlParser(object):
 		insn = self.__parseInstruction(t)
 		self.tree.curBlock.insns.append(insn)
 
-	def parseFile(self, filename):
-		self.parseData(awlFileRead(filename))
+	def parseSource(self, awlSource):
+		"""Parse an AWL source.
+		awlSource is an AwlSource instance."""
+		self.parseData(awlSource.sourceBytes, str(awlSource))
 
-	def parseData(self, data):
+	def parseData(self, dataBytes, fileId=""):
+		try:
+			data = dataBytes.decode(self.TEXT_ENCODING)
+		except UnicodeError as e:
+			raise AwlParserError("Could not decode AWL/STL charset.")
+		#FIXME: This check will trigger, if there is no OB, which may happen
+		#       for projects with multiple awl files.
 		self.flatLayout = not re.match(r'.*^\s*ORGANIZATION_BLOCK\s+.*',
 					       data, re.DOTALL | re.MULTILINE)
 		try:
-			self.__tokenize(data)
+			self.__tokenize(data, fileId)
 		except AwlParserError as e:
 			e.setLineNr(self.lineNr)
+			e.setFileId(fileId)
 			raise e
 
 	def getParseTree(self):
