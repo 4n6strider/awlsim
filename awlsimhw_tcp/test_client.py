@@ -10,4 +10,4 @@ while True:
         print repr(received)
         time.sleep(0.5)
     except KeyboardInterrupt:
-        pass
+        break

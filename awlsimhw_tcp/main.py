@@ -51,7 +51,7 @@ class HardwareInterface(AbstractHardwareInterface):
                     self.request.sendall(self.sim.cpu.fetchOutputRange(self.ou_address, 512))
                     time.sleep(0.5)
                 except socket.error:
-                    pass
+                    break
 
     def doStartup(self):
         handler = self.MyTCPHandler
