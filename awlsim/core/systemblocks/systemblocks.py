@@ -39,6 +39,9 @@ class SystemBlock(Block):
 		BlockInterfaceField.FTYPE_STAT	: (),
 	}
 
+	# Set to True by the subclass, if the implementation is incomplete.
+	broken = False
+
 	def __init__(self, cpu, interface):
 		insns = [
 			AwlInsn_GENERIC_CALL(cpu, self.run),
@@ -85,8 +88,10 @@ class SystemBlock(Block):
 		self.__interfaceOpers = {}
 		for field in self.interface.fields_IN_OUT_INOUT_STAT:
 			# Create a scratch-operator for the access.
+			offset = AwlOffset(None, None)
+			offset.varName = field.name
 			oper = AwlOperator(AwlOperator.NAMED_LOCAL, 0,
-					   field.name)
+					   offset)
 			# Resolve the scratch-operator.
 			oper = self.cpu.resolveNamedLocal(block=self, insn=None,
 							  oper=oper, pointer=False)

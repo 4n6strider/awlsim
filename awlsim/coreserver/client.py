@@ -2,7 +2,7 @@
 #
 # AWL simulator - PLC core server client
 #
-# Copyright 2013 Michael Buesch <m@bues.ch>
+# Copyright 2013-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -36,7 +36,9 @@ class AwlSimClient(object):
 		self.serverProcess = None
 		self.transceiver = None
 
-	def spawnServer(self, interpreter=None,
+	def spawnServer(self,
+			interpreter=None,
+			serverExecutable=None,
 			listenHost=AwlSimServer.DEFAULT_HOST,
 			listenPort=AwlSimServer.DEFAULT_PORT):
 		"""Spawn a new AwlSim-core server process.
@@ -44,7 +46,10 @@ class AwlSimClient(object):
 			       - None: Use sys.executable as interpreter.
 			       - a string: Use the specified interpreter binary.
 			       - list of strings: Try with the interpreters in the
-			                          list, until the first working one is found.
+						  list, until the first working one is found.
+		serverExecutable -> The server executable to run.
+				    This has precedence over 'interpreter'.
+				    May be a list of strings.
 		listenHost -> The hostname or IP address to listen on.
 		listenPort -> The port to listen on.
 		Returns the spawned process' PID."""
@@ -52,24 +57,33 @@ class AwlSimClient(object):
 		if self.serverProcess:
 			raise AwlSimError("Server already running")
 
-		if interpreter is None:
-			interpreter = [ sys.executable, ]
-		elif not isinstance(interpreter, list) and\
-		     not isinstance(interpreter, tuple):
-			interpreter = [ interpreter, ]
-
-		for interp in interpreter:
-			if not AwlSimServer.findExecutable(interp):
-				continue
-			self.serverProcess = AwlSimServer.start(listenHost = listenHost,
-								listenPort = listenPort,
-								forkInterpreter = interp)
-			break
+		if serverExecutable:
+			for serverExe in toList(serverExecutable):
+				if not AwlSimServer.findExecutable(serverExe):
+					continue
+				self.serverProcess = AwlSimServer.start(listenHost = listenHost,
+									listenPort = listenPort,
+									forkServerProcess = serverExe)
+				break
+			else:
+				raise AwlSimError("Unable to fork any of the supplied "
+					"server executables: %s" %\
+					str(toList(serverExecutable)))
 		else:
-			raise AwlSimError("Unable to fork an awlsim core server with "
-				"any of the supplied Python interpreters: %s\n"
-				"No interpreter found." %\
-				str(interpreter))
+			if interpreter is None:
+				interpreter = sys.executable
+			for interp in toList(interpreter):
+				if not AwlSimServer.findExecutable(interp):
+					continue
+				self.serverProcess = AwlSimServer.start(listenHost = listenHost,
+									listenPort = listenPort,
+									forkInterpreter = interp)
+				break
+			else:
+				raise AwlSimError("Unable to fork an awlsim core server with "
+					"any of the supplied Python interpreters: %s\n"
+					"No interpreter found." %\
+					str(toList(interpreter)))
 		if isJython:
 			#XXX Workaround: Jython's socket module does not like connecting
 			# to a starting server. Wait a few seconds for the server
@@ -285,17 +299,17 @@ class AwlSimClient(object):
 			raise AwlSimError("AwlSimClient: Failed to set run state")
 		return True
 
-	def loadCode(self, code):
+	def loadCode(self, codeSource):
 		if not self.transceiver:
 			return False
-		msg = AwlSimMessage_LOAD_CODE(code)
+		msg = AwlSimMessage_LOAD_CODE(codeSource)
 		status = self.__sendAndWaitFor_REPLY(msg, 10.0)
 		if status != AwlSimMessage_REPLY.STAT_OK:
 			raise AwlSimError("AwlSimClient: Failed to load code")
 		return True
 
-	def loadSymbolTable(self, symTabText):
-		msg = AwlSimMessage_LOAD_SYMTAB(symTabText)
+	def loadSymbolTable(self, symTabSource):
+		msg = AwlSimMessage_LOAD_SYMTAB(symTabSource)
 		status = self.__sendAndWaitFor_REPLY(msg)
 		if status != AwlSimMessage_REPLY.STAT_OK:
 			raise AwlSimError("AwlSimClient: Failed to load symbol table")

@@ -10,6 +10,10 @@ import hashlib
 from distutils.core import setup
 from distutils.extension import Extension
 from awlsim.core.version import VERSION_MAJOR, VERSION_MINOR
+try:
+	import py2exe
+except ImportError as e:
+	py2exe = None
 
 
 def makedirs(path, mode):
@@ -171,6 +175,7 @@ def tryBuildCythonModules():
 cmdclass = {}
 ext_modules = []
 extraScripts = []
+extraKeywords = {}
 # Try to build the Cython modules. This might fail.
 tryBuildCythonModules()
 
@@ -192,9 +197,12 @@ try:
 except ValueError:
 	pass
 
+if py2exe:
+	extraKeywords["console"] = [ "awlsimgui", "awlsim/coreserver/server.py", ]
+
 setup(	name		= "awlsim",
 	version		= "%d.%d" % (VERSION_MAJOR, VERSION_MINOR),
-	description	= "Step 7 AWL/STL/PLC simulator",
+	description	= "S7 AWL/STL Soft-PLC",
 	license		= "GNU General Public License v2 or later",
 	author		= "Michael Buesch",
 	author_email	= "m@bues.ch",
@@ -213,6 +221,7 @@ setup(	name		= "awlsim",
 	scripts		= [ "awlsimcli",
 			    "awlsimgui",
 			    "awlsim-server",
+			    "awlsim-symtab",
 			    "awlsim-linuxcnc-hal",
 			    "awlsim-win.bat", ] + extraScripts,
 	cmdclass	= cmdclass,
@@ -240,12 +249,17 @@ setup(	name		= "awlsim",
 		"Programming Language :: Python :: 3",
 		"Programming Language :: Python :: Implementation :: CPython",
 		"Programming Language :: Python :: Implementation :: PyPy",
+		"Programming Language :: Python :: Implementation :: Jython",
+		"Programming Language :: Python :: Implementation :: IronPython",
 		"Topic :: Education",
+		"Topic :: Home Automation",
 		"Topic :: Scientific/Engineering",
 		"Topic :: Software Development",
 		"Topic :: Software Development :: Interpreters",
+		"Topic :: Software Development :: Embedded Systems",
 		"Topic :: Software Development :: Testing",
 		"Topic :: System :: Emulators",
 	],
-	long_description = open("README.txt").read()
+	long_description = open("README.txt").read(),
+	**extraKeywords
 )

@@ -2,7 +2,7 @@
 #
 # AWL simulator - PLC core server
 #
-# Copyright 2013 Michael Buesch <m@bues.ch>
+# Copyright 2013-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -127,10 +127,11 @@ class AwlSimServer(object):
 	@classmethod
 	def start(cls, listenHost, listenPort,
 		  forkInterpreter=None,
+		  forkServerProcess=None,
 		  commandMask=CMDMSK_SHUTDOWN):
 		"""Start a new server.
-		If 'forkInterpreter' is not None, spawn a subprocess.
-		If 'forkInterpreter' is None, run the server in this process."""
+		If 'forkInterpreter' or 'forkServerProcess' are not None, spawn a subprocess.
+		If 'forkInterpreter' and 'forkServerProcess' are None, run the server in this process."""
 
 		# Prepare the environment for the server process.
 		# Inherit from the starter and add awlsim specific variables.
@@ -141,10 +142,18 @@ class AwlSimServer(object):
 		env["AWLSIM_CORESERVER_LOGLEVEL"]	= str(Logging.getLoglevel())
 		env["AWLSIM_CORESERVER_CMDMSK"]		= str(int(commandMask))
 
-		if forkInterpreter is None:
-			# Do not fork. Just run the server in this process.
-			return cls._execute(env)
-		else:
+		if forkServerProcess:
+			# Fork a new server process.
+			proc = cls.findExecutable(forkServerProcess)
+			printInfo("Forking server process '%s'" % proc)
+			if not proc:
+				raise AwlSimError("Failed to run executable '%s'" %\
+						  forkServerProcess)
+			serverProcess = PopenWrapper([proc],
+						     env = env,
+						     shell = False)
+			return serverProcess
+		elif forkInterpreter:
 			# Fork a new interpreter process and run server.py as module.
 			interp = cls.findExecutable(forkInterpreter)
 			printInfo("Forking awlsim core server with interpreter '%s'" % interp)
@@ -155,6 +164,9 @@ class AwlSimServer(object):
 						     env = env,
 						     shell = False)
 			return serverProcess
+		else:
+			# Do not fork. Just run the server in this process.
+			return cls._execute(env)
 
 	@classmethod
 	def _execute(cls, env=None):
@@ -326,16 +338,16 @@ class AwlSimServer(object):
 	def __rx_LOAD_CODE(self, client, msg):
 		status = AwlSimMessage_REPLY.STAT_OK
 		parser = AwlParser()
-		parser.parseData(msg.code)
+		parser.parseSource(msg.source)
 		self.__setRunState(self.STATE_INIT)
 		self.sim.load(parser.getParseTree())
 		client.transceiver.send(AwlSimMessage_REPLY.make(msg, status))
 
 	def __rx_LOAD_SYMTAB(self, client, msg):
 		status = AwlSimMessage_REPLY.STAT_OK
-		symbolTable = SymTabParser.parseData(msg.symTabText,
-						     autodetectFormat = True,
-						     mnemonics = self.sim.cpu.getSpecs().getMnemonics())
+		symbolTable = SymTabParser.parseSource(msg.source,
+					autodetectFormat = True,
+					mnemonics = self.sim.cpu.getSpecs().getMnemonics())
 		self.__setRunState(self.STATE_INIT)
 		self.sim.loadSymbolTable(symbolTable)
 		client.transceiver.send(AwlSimMessage_REPLY.make(msg, status))

@@ -100,7 +100,8 @@ def awlFileRead(filename, encoding="latin_1"):
 	return data
 
 def awlFileWrite(filename, data, encoding="latin_1"):
-	data = "\r\n".join(data.splitlines()) + "\r\n"
+	if encoding != "binary":
+		data = "\r\n".join(data.splitlines()) + "\r\n"
 	for count in range(1000):
 		tmpFile = "%s-%d-%d.tmp" %\
 			(filename, random.randint(0, 0xFFFF), count)
@@ -129,9 +130,16 @@ def awlFileWrite(filename, data, encoding="latin_1"):
 			pass
 
 # Returns the index of a list element, or -1 if not found.
-def listIndex(_list, value, start=0, stop=-1):
+# If translate if not None, it should be a callable that translates
+# a list entry. Arguments are index, entry.
+def listIndex(_list, value, start=0, stop=-1, translate=None):
 	if stop < 0:
 		stop = len(_list)
+	if translate:
+		for i, ent in enumerate(_list[start:stop], start):
+			if translate(i, ent) == value:
+				return i
+		return -1
 	try:
 		return _list.index(value, start, stop)
 	except ValueError:

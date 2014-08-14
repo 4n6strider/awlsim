@@ -27,12 +27,14 @@ from awlsim.core.enumeration import *
 
 class AwlSimError(Exception):
 	def __init__(self, message, cpu=None,
-		     rawInsn=None, insn=None, lineNr=None):
+		     rawInsn=None, insn=None, lineNr=None,
+		     fileId=None):
 		Exception.__init__(self, message)
 		self.cpu = cpu
 		self.rawInsn = rawInsn
 		self.insn = insn
 		self.lineNr = lineNr
+		self.fileId = fileId
 
 	def setCpu(self, cpu):
 		self.cpu = cpu
@@ -51,6 +53,12 @@ class AwlSimError(Exception):
 
 	def getInsn(self):
 		return self.insn
+
+	def setFileId(self, fileId):
+		self.fileId = fileId
+
+	def getFileId(self):
+		return self.fileId
 
 	def setLineNr(self, lineNr):
 		self.lineNr = lineNr
@@ -88,8 +96,14 @@ class AwlSimError(Exception):
 		return errorStr
 
 	def doGetReport(self, title):
+		fileId = self.getFileId()
+		if fileId:
+			fileId += " "
+		else:
+			fileId = ""
 		ret = [ "-- %s --\n" % title ]
-		ret.append("ERROR at line %s:\n" % self.getLineNrStr())
+		ret.append("ERROR at %sline %s:\n" %\
+			   (fileId, self.getLineNrStr()))
 		ret.append("  \n%s\n" % str(self))
 		cpu = self.getCpu()
 		if cpu:
@@ -107,6 +121,13 @@ class AwlParserError(AwlSimError):
 
 	def getReport(self):
 		return self.doGetReport("AWL parser error")
+
+class AwlSimBug(AwlSimError):
+	def __init__(self, message, *args, **kwargs):
+		message = "AWLSIM BUG: %s\n"\
+			"This bug should be reported to the awlsim developers." %\
+			str(message)
+		AwlSimError.__init__(self, message, *args, **kwargs)
 
 class AwlSimErrorText(AwlSimError):
 	def __init__(self, errorText):

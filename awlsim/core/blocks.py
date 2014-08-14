@@ -39,16 +39,25 @@ class BlockInterfaceField(object):
 	FTYPE_TEMP	= EnumGen.item
 	EnumGen.end
 
-	def __init__(self, name, dataType, initialValue=None):
+	def __init__(self, name, dataType):
 		# name -> The name string of the field, as defined
 		#         in the block interface definition.
 		# dataType -> One of AwlDataType instance.
-		# initialValue -> Initial value for this field, as defined in
-		#                 the block interface definition.
 		self.name = name
 		self.dataType = dataType
 		self.fieldType = self.FTYPE_UNKNOWN
-		self.initialValue = initialValue
+
+	def __repr__(self):
+		ftype = {
+			self.FTYPE_UNKNOWN	: "UNKNOWN",
+			self.FTYPE_IN		: "IN",
+			self.FTYPE_OUT		: "OUT",
+			self.FTYPE_INOUT	: "IN_OUT",
+			self.FTYPE_STAT		: "STAT",
+			self.FTYPE_TEMP		: "TEMP",
+		}[self.fieldType]
+		return "(%s)  %s : %s" %\
+			(ftype, self.name, str(self.dataType))
 
 class BlockInterface(object):
 	# Data-types that must be passed "by-reference" to FCs/FBs.
@@ -175,13 +184,10 @@ class BlockInterface(object):
 			raise AwlSimError("Data structure field '%s' does not exist." %\
 				name)
 
-	def getOperatorForFieldName(self, name, wantPointer):
-		return self.getOperatorForField(self.getFieldByName(name),
-						wantPointer)
-
 	# Get an AwlOperator for TEMP access.
-	def __getOperatorForField_TEMP(self, interfaceField, wantPointer):
-		structField = self.tempStruct.getField(interfaceField.name)
+	def __getOperatorForField_TEMP(self, interfaceField, arrayIndex, wantPointer):
+		structField = self.tempStruct.getField(interfaceField.name,
+						       arrayIndex)
 		if wantPointer:
 			ptrValue = structField.offset.toPointerValue()
 			return AwlOperator(type = AwlOperator.IMM_PTR,
@@ -192,16 +198,29 @@ class BlockInterface(object):
 				   width=structField.bitSize,
 				   value=structField.offset.dup())
 
-	# Get an AwlOperator that addresses the specified interfaceField.
+	# Get an AwlOperator that addresses the specified interface field identified
+	# by "name" and "indices".
+	# "name" is the field name and "indices" are the array indices, if any.
 	# If wantPointer is true, an IMM_PTR AwlOperator to the interfaceField
 	# is returned.
-	def getOperatorForField(self, interfaceField, wantPointer):
+	def getOperatorForField(self, name, indices, wantPointer):
+		interfaceField = self.getFieldByName(name)
+
+		if interfaceField.dataType.type == AwlDataType.TYPE_ARRAY:
+			# Get the linear array index.
+			arrayIndex = interfaceField.dataType.arrayIndicesCollapse(*indices)
+		else:
+			arrayIndex = None
+
 		if interfaceField.fieldType == interfaceField.FTYPE_TEMP:
 			# get TEMP interface field operator
-			return self.__getOperatorForField_TEMP(interfaceField, wantPointer)
+			return self.__getOperatorForField_TEMP(interfaceField,
+							       arrayIndex,
+							       wantPointer)
 		# otherwise get IN/OUT/INOUT/STAT interface field operator
 
-		structField = self.struct.getField(interfaceField.name)
+		structField = self.struct.getField(interfaceField.name,
+						   arrayIndex)
 
 		# FC-parameters cannot be resolved statically.
 		assert(self.hasInstanceDB)

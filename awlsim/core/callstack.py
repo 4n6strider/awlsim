@@ -50,31 +50,18 @@ class CallStackElem(object):
 		# parameters -> An iterable of AwlParamAssign instances
 		#               representing the parameter assignments in CALL insn.
 		# isRawCall -> True, if the calling instruction was UC or CC.
-		(self.cpu,
-		 self.parenStack,
-		 self.ip,
-		 self.lalloc,
-		 self.block,
-		 self.insns,
-		 self.labels,
-		 self.isRawCall,
-		 self.instanceDB,
-		 self.prevDbRegister,
-		 self.prevDiRegister) = (
-			cpu,
-			[],
-			0,
-			self.lallocCache.get(cpu),
-			block,
-			block.insns,
-			block.labels,
-			isRawCall,
-			instanceDB,
-			cpu.dbRegister,
-			cpu.diRegister,
-		)
-		self.localdata = self.lalloc.localdata
+		self.cpu = cpu
+		self.parenStack = []
+		self.ip = 0
+		self.block = block
+		self.insns = block.insns
+		self.isRawCall = isRawCall
+		self.instanceDB = instanceDB
+		self.prevDbRegister = cpu.dbRegister
+		self.prevDiRegister = cpu.diRegister
+		self.lalloc = self.lallocCache.get(cpu)
 		self.lalloc.allocation = block.interface.tempAllocation
+		self.localdata = self.lalloc.localdata
 
 		# Handle parameters
 		self.__outboundParams = []
@@ -88,13 +75,17 @@ class CallStackElem(object):
 				# Copy the inbound data into the instance DB
 				# and add the outbound parameters to the list.
 				for param in parameters:
-					if param.isOutbound(blockInterface):
+					#TODO param interface and instanceDB assignments should
+					#     be done at translation time.
+					param.interface, param.instanceDB =\
+						blockInterface, instanceDB
+					if param.isOutbound:
 						# This is an outbound parameter.
 						self.__outboundParams.append(param)
-					if param.isInbound(blockInterface):
+					if param.isInbound:
 						# This is an inbound parameter.
 						# Transfer data into DBI
-						structField = param.getLvalueStructField(instanceDB)
+						structField = param.lValueStructField
 						if structField.dataType.type in callByRef_Types:
 							data = param.rvalueOp.resolve().value.byteOffset
 						else:
@@ -109,117 +100,113 @@ class CallStackElem(object):
 				#                 the FC interface r-value.
 				self.interfRefs = {}
 				for param in parameters:
+					#TODO param interface assignment should
+					#     be done at translation time.
+					param.interface = blockInterface
 					try:
-						translator = self.__paramTrans[param.rvalueOp.type]
+						trans = self.__paramTrans[param.rvalueOp.type]
 					except KeyError as e:
 						raise AwlSimError("Do not know how to translate "
 							"FC parameter '%s' for call. The specified "
 							"actual-parameter is not allowed in this call." %\
 							str(param))
-					self.interfRefs[param.getInterfaceFieldIndex(blockInterface)] =\
-						translator(self, param.rvalueOp)
+					self.interfRefs[param.interfaceFieldIndex] = trans(self, param, param.rvalueOp)
 
-	def __trans_IMM(self, oper):
-		# 'oper' is an immediate.
+	# Don't perform translation.
+	# For various MEM and BLKREF accesses.
+	def __trans_direct(self, param, rvalueOp):
+		return rvalueOp
+
+	# Copy parameter r-value to the caller-L-stack, if inbound
+	# and register a copy-back request, if outbound.
+	def __trans_copyToVL(self, param, rvalueOp):
 		# Allocate space in the caller-L-stack.
 		lalloc = self.cpu.callStackTop.lalloc
-		loff = lalloc.alloc((oper.width // 8) if (oper.width > 8) else 1)
-		# Write the immediate to the allocated space.
-		WordPacker.toBytes(lalloc.localdata, oper.width, loff, oper.value)
+		loffset = lalloc.alloc(rvalueOp.width)
+		if param.isInbound:
+			# Write the value to the allocated space.
+			WordPacker.toBytes(lalloc.localdata, rvalueOp.width,
+					   loffset.byteOffset,
+					   self.cpu.fetch(rvalueOp))
 		# Make an operator for the allocated space.
-		return AwlOperator(AwlOperator.MEM_VL,
-				   oper.width,
-				   AwlOffset(loff, 0),
-				   oper.insn)
-
-	def __trans_MEM(self, oper):
-		# 'oper' is a memory access.
+		oper = AwlOperator(AwlOperator.MEM_VL,
+				   rvalueOp.width,
+				   loffset,
+				   rvalueOp.insn)
+		# If outbound, save param and operator for return from CALL.
+		if param.isOutbound:
+			param.scratchSpaceOp = oper
+			self.__outboundParams.append(param)
 		return oper
 
-	def __trans_MEM_L(self, oper):
-		# 'oper' is an L-stack memory access.
-		return AwlOperator(oper.MEM_VL,
-				   oper.width,
-				   oper.value,
-				   oper.insn)
+	# Translate L-stack access r-value.
+	def __trans_MEM_L(self, param, rvalueOp):
+		# r-value is an L-stack memory access.
+		# Translate it to a VL-stack memory access.
+		return AwlOperator(rvalueOp.MEM_VL,
+				   rvalueOp.width,
+				   rvalueOp.value,
+				   rvalueOp.insn)
 
-	def __trans_MEM_VL(self, oper):
-		# 'oper' is a VL-stack reference (i.e. the L-stack of the caller's caller).
-		# Allocate space in the caller-L-stack and copy the data.
-		lalloc = self.cpu.callStackTop.lalloc
-		loff = lalloc.alloc((oper.width // 8) if (oper.width > 8) else 1)
-		# Write the value to the allocated space.
-		WordPacker.toBytes(lalloc.localdata, oper.width, loff,
-				   self.cpu.fetch(oper))
-		# Make an operator for the allocated space.
-		return AwlOperator(AwlOperator.MEM_VL,
-				   oper.width,
-				   AwlOffset(loff, 0),
-				   oper.insn)
-
-	def __trans_MEM_DB(self, oper):
+	# Translate DB access r-value.
+	def __trans_MEM_DB(self, param, rvalueOp, copyToVL=False):
 		# A parameter is forwarded from an FB to an FC.
-		if oper.value.dbNumber is not None:
+		if rvalueOp.value.dbNumber is not None:
 			# This is a fully qualified DB access.
-			# Just forward it.
-			return oper
-		#FIXME the data should be copied
-		offset = oper.value.dup()
-		offset.dbNumber = self.cpu.dbRegister.index
-		return AwlOperator(oper.MEM_DB,
-				   oper.width,
+			self.cpu.run_AUF(AwlOperator(AwlOperator.BLKREF_DB, 16,
+						     AwlOffset(rvalueOp.value.dbNumber),
+						     rvalueOp.insn))
+			copyToVL = True
+		if copyToVL:
+			# Copy to caller-L-stack.
+			return self.__trans_copyToVL(param, rvalueOp)
+		# Do not copy to caller-L-stack. Just make a DB-reference.
+		offset = rvalueOp.value.dup()
+		return AwlOperator(rvalueOp.MEM_DB,
+				   rvalueOp.width,
 				   offset,
-				   oper.insn)
+				   rvalueOp.insn)
 
-	def __trans_MEM_DI(self, oper):
-		# A parameter is forwarded from an FB to an FC.
-		#FIXME the data should be copied
-		offset = oper.value.dup()
-		offset.dbNumber = self.cpu.diRegister.index
-		return AwlOperator(oper.MEM_DB,
-				   oper.width,
-				   offset,
-				   oper.insn)
-
-	def __trans_BLKREF(self, oper):
-		# 'oper' is a block reference (e.g. 'FC 1', 'DB 10', ...)
-		return oper
-
-	def __trans_NAMED_LOCAL(self, oper):
-		# 'oper' is a named-local (#abc)
-		oper = self.cpu.callStackTop.interfRefs[oper.interfaceIndex]
-		if oper.type == oper.MEM_VL:
-			return self.__trans_MEM_VL(oper)
+	# Translate named local variable r-value.
+	def __trans_NAMED_LOCAL(self, param, rvalueOp):
+		# r-value is a named-local (#abc)
+		oper = self.cpu.callStackTop.interfRefs[rvalueOp.interfaceIndex]
 		if oper.type == oper.MEM_DB:
-			return self.__trans_MEM_DB(oper)
-		assert(0)
+			return self.__trans_MEM_DB(param, oper, True)
+		try:
+			return self.__paramTrans[oper.type](self, param, oper)
+		except KeyError as e:
+			raise AwlSimBug("Unhandled call translation of "
+				"named local parameter assignment:\n"
+				"'%s' => r-value operator '%s'" %\
+				(str(param), str(oper)))
 
 	# FC call parameter translators
 	__paramTrans = {
-		AwlOperator.IMM			: __trans_IMM,
-		AwlOperator.IMM_REAL		: __trans_IMM,
-		AwlOperator.IMM_S5T		: __trans_IMM,
-		AwlOperator.IMM_TIME		: __trans_IMM,
-		AwlOperator.IMM_DATE		: __trans_IMM,
-		AwlOperator.IMM_TOD		: __trans_IMM,
-		AwlOperator.IMM_DT		: __trans_IMM,
-		AwlOperator.IMM_PTR		: __trans_IMM,
+		AwlOperator.IMM			: __trans_copyToVL,
+		AwlOperator.IMM_REAL		: __trans_copyToVL,
+		AwlOperator.IMM_S5T		: __trans_copyToVL,
+		AwlOperator.IMM_TIME		: __trans_copyToVL,
+		AwlOperator.IMM_DATE		: __trans_copyToVL,
+		AwlOperator.IMM_TOD		: __trans_copyToVL,
+		AwlOperator.IMM_DT		: __trans_copyToVL,
+		AwlOperator.IMM_PTR		: __trans_copyToVL,
 
-		AwlOperator.MEM_E		: __trans_MEM,
-		AwlOperator.MEM_A		: __trans_MEM,
-		AwlOperator.MEM_M		: __trans_MEM,
+		AwlOperator.MEM_E		: __trans_direct,
+		AwlOperator.MEM_A		: __trans_direct,
+		AwlOperator.MEM_M		: __trans_direct,
 		AwlOperator.MEM_L		: __trans_MEM_L,
-		AwlOperator.MEM_VL		: __trans_MEM_VL,
+		AwlOperator.MEM_VL		: __trans_copyToVL,
 		AwlOperator.MEM_DB		: __trans_MEM_DB,
-		AwlOperator.MEM_DI		: __trans_MEM_DI,
-		AwlOperator.MEM_T		: __trans_MEM,
-		AwlOperator.MEM_Z		: __trans_MEM,
-		AwlOperator.MEM_PA		: __trans_MEM,
-		AwlOperator.MEM_PE		: __trans_MEM,
+		AwlOperator.MEM_DI		: __trans_copyToVL,
+		AwlOperator.MEM_T		: __trans_direct,
+		AwlOperator.MEM_Z		: __trans_direct,
+		AwlOperator.MEM_PA		: __trans_direct,
+		AwlOperator.MEM_PE		: __trans_direct,
 
-		AwlOperator.BLKREF_FC		: __trans_BLKREF,
-		AwlOperator.BLKREF_FB		: __trans_BLKREF,
-		AwlOperator.BLKREF_DB		: __trans_BLKREF,
+		AwlOperator.BLKREF_FC		: __trans_direct,
+		AwlOperator.BLKREF_FB		: __trans_direct,
+		AwlOperator.BLKREF_DB		: __trans_direct,
 
 		AwlOperator.NAMED_LOCAL		: __trans_NAMED_LOCAL,
 	}
@@ -238,12 +225,22 @@ class CallStackElem(object):
 				for param in self.__outboundParams:
 					cpu.store(
 						param.rvalueOp,
-						structInstance.getFieldData(param.getLvalueStructField(instanceDB))
+						structInstance.getFieldData(param.lValueStructField)
 					)
 			# Assign the DB/DI registers.
 			self.cpu.dbRegister, self.cpu.diRegister = self.instanceDB, self.prevDiRegister
 		else:
 			# We are returning from an FC.
+			# Transfer data out of temporary sections.
+			if self.__outboundParams:
+				cpu = self.cpu
+				for param in self.__outboundParams:
+					cpu.store(
+						param.rvalueOp,
+						cpu.fetch(AwlOperator(AwlOperator.MEM_L,
+								      param.scratchSpaceOp.width,
+								      param.scratchSpaceOp.value))
+					)
 			# Assign the DB/DI registers.
 			self.cpu.dbRegister, self.cpu.diRegister = self.prevDbRegister, self.prevDiRegister
 

@@ -2,7 +2,7 @@
 #
 # AWL data types
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,39 +22,67 @@
 from __future__ import division, absolute_import, print_function, unicode_literals
 from awlsim.core.compat import *
 
+from awlsim.core.dynattrs import *
 from awlsim.core.util import *
 from awlsim.core.timers import *
 from awlsim.core.datatypehelpers import *
 
 
-class AwlOffset(object):
+class AwlOffset(DynAttrs):
 	"Memory area offset"
 
-	def __init__(self, byteOffset, bitOffset=0, dbNumber=None):
-		self.byteOffset = byteOffset
-		self.bitOffset = bitOffset
-		self.dbNumber = dbNumber
+	dynAttrs = {
+		# A DB-number for fully qualified access, or None.
+		"dbNumber"	: None,
+
+		# A symbolic DB-name for fully qualified access, or None.
+		"dbName"	: None,
+
+		# A DB-variable name for fully qualified access, or None.
+		"varName"	: None,
+
+		# List of Variable indices for fully qualified array access, or None.
+		"indices"	: None,
+	}
+
+	def __init__(self, byteOffset, bitOffset=0):
+		self.byteOffset, self.bitOffset =\
+			byteOffset, bitOffset
 
 	def dup(self):
-		return AwlOffset(self.byteOffset,
-				 self.bitOffset,
-				 self.dbNumber)
+		offset = AwlOffset(self.byteOffset,
+				   self.bitOffset)
+		offset.dbNumber = self.dbNumber
+		return offset
 
 	@classmethod
 	def fromPointerValue(cls, value):
-		return cls((value & 0x00FFFFF8) >> 3,
+		return cls((value & 0x0007FFF8) >> 3,
 			   (value & 0x7))
 
 	def toPointerValue(self):
-		return ((self.byteOffset << 3) & 0x00FFFFF8) |\
+		return ((self.byteOffset << 3) & 0x0007FFF8) |\
 		       (self.bitOffset & 0x7)
 
 	def __repr__(self):
+		prefix = ""
 		if self.dbNumber is not None:
-			return "DB%d(%d.%d)" % (self.dbNumber,
-						self.byteOffset,
-						self.bitOffset)
-		return "%d.%d" % (self.byteOffset, self.bitOffset)
+			prefix = "DB%d" % self.dbNumber
+		if self.dbName is not None:
+			prefix = '"%s"' % self.dbName
+		if self.varName is not None:
+			indices = ""
+			if self.indices is not None:
+				indices = "[%s]" % ",".join(str(i) for i in self.indices)
+			if prefix:
+				return prefix + "." + self.varName + indices
+			return "#%s%s" % (self.varName, indices)
+		else:
+			if prefix:
+				prefix = prefix + ".DBX "
+			return "%s%d.%d" % (prefix,
+					    self.byteOffset,
+					    self.bitOffset)
 
 class AwlDataType(object):
 	# Data type IDs
@@ -161,6 +189,15 @@ class AwlDataType(object):
 		TYPE_REAL,
 	)
 
+	# Convert a list of array dimensions into a number of elements.
+	@classmethod
+	def arrayDimensionsToNrElements(cls, dimensions):
+		assert(dimensions is not None)
+		assert(len(dimensions) >= 1 and len(dimensions) <= 6)
+		nrElems = reduce(lambda a, b: a * (b[1] - b[0] + 1),
+				 dimensions, 1)
+		return nrElems
+
 	@classmethod
 	def _name2typeid(cls, nameTokens):
 		nameTokens = toList(nameTokens)
@@ -171,12 +208,11 @@ class AwlDataType(object):
 					  nameTokens[0] if len(nameTokens) else "None")
 
 	@classmethod
-	def makeByName(cls, nameTokens):
+	def makeByName(cls, nameTokens, arrayDimensions=None):
 		type = cls._name2typeid(nameTokens)
 		index = None
-		subType = None
 		if type == cls.TYPE_ARRAY:
-			raise AwlSimError("ARRAYs not supported, yet") #TODO
+			raise AwlSimError("Nested ARRAYs are not allowed")
 		elif type in (cls.TYPE_DB_X,
 			      cls.TYPE_OB_X,
 			      cls.TYPE_FC_X,
@@ -192,55 +228,110 @@ class AwlDataType(object):
 				raise AwlSimError("Invalid '%s' block data type "\
 					"index" % nameTokens[0])
 			index = blockNumber
-		return cls(type = type,
-			   width = cls.type2width[type],
-			   isSigned = (type in cls.signedTypes),
-			   index = index,
-			   subType = subType)
+		if arrayDimensions:
+			# An ARRAY is to be constructed.
+			nrArrayElements = cls.arrayDimensionsToNrElements(arrayDimensions)
+			elementType = cls(type = type,
+					  width = cls.type2width[type],
+					  isSigned = (type in cls.signedTypes),
+					  index = index)
+			# Make a tuple of children types.
+			# Each element is a ref to the same AwlDataType instance.
+			children = tuple([ elementType, ] * nrArrayElements)
+			return cls(type = cls.TYPE_ARRAY,
+				   width = nrArrayElements,
+				   isSigned = (type in cls.signedTypes),
+				   index = index,
+				   children = children,
+				   arrayDimensions = arrayDimensions)
+		else:
+			return cls(type = type,
+				   width = cls.type2width[type],
+				   isSigned = (type in cls.signedTypes),
+				   index = index)
 
 	def __init__(self, type, width, isSigned,
-		     index=None, subType=None):
-		self.type = type
-		self.width = width
-		self.isSigned = isSigned
-		self.index = index
-		self.subType = subType		#TODO
+		     index=None, children=None,
+		     arrayDimensions=None):
+		self.type = type		# The TYPE_... for this datatype
+		self.width = width		# The width, in bits. If type==TYPE_ARRAY, this is the number of elements.
+		self.isSigned = isSigned	# True, if this type is signed
+		self.index = index		# The Index number, if any. May be None
+		self.children = children	# The children AwlDataTypes, if ARRAY.
+		self.arrayDimensions = arrayDimensions # The ARRAY's dimensions
+
+	# Convert array indices into a one dimensional index for this array.
+	# 'indices' are the indices as written in the AWL operator
+	# from left to right.
+	def arrayIndicesCollapse(self, *indices):
+		if len(indices) < 1 or len(indices) > 6:
+			raise AwlSimError("Invalid number of array indices")
+		assert(self.type == self.TYPE_ARRAY)
+		signif = self.arrayIndexSignificances()
+		assert(len(indices) == len(signif))
+		assert(len(indices) == len(self.arrayDimensions))
+		resIndex = 0
+		for i, idx in enumerate(indices):
+			startIdx = self.arrayDimensions[i][0]
+			resIndex += (idx - startIdx) * signif[i]
+		return resIndex
+
+	# Get the array dimension sizes. Returns a tuple of integers.
+	def arrayDimSizes(self):
+		assert(self.type == self.TYPE_ARRAY)
+		return tuple(end - start + 1
+			     for start, end in self.arrayDimensions)
+
+	# Get the array index significances. Returns a tuple of integers.
+	def arrayIndexSignificances(self):
+		assert(self.type == self.TYPE_ARRAY)
+		sizes = self.arrayDimSizes()
+		signif = [ 1, ]
+		for size in sizes[:0:-1]:
+			signif.append(size * signif[-1])
+		return tuple(signif[::-1])
 
 	# Parse an immediate, constrained by our datatype.
 	def parseMatchingImmediate(self, tokens):
+		typeId = self.type
+		if typeId == self.TYPE_ARRAY:
+			typeId = self.children[0].type
+
 		value = None
-		if len(tokens) == 9:
-			if self.type == self.TYPE_DWORD:
+		if tokens is None:
+			value = 0
+		elif len(tokens) == 9:
+			if typeId == self.TYPE_DWORD:
 				value, fields = self.tryParseImmediate_ByteArray(
 							tokens)
 		elif len(tokens) == 5:
-			if self.type == self.TYPE_WORD:
+			if typeId == self.TYPE_WORD:
 				value, fields = self.tryParseImmediate_ByteArray(
 							tokens)
 		elif len(tokens) == 2:
-			if self.type == self.TYPE_TIMER:
+			if typeId == self.TYPE_TIMER:
 				if tokens[0].upper() == "T":
 					value = self.tryParseImmediate_INT(tokens[1])
-			elif self.type == self.TYPE_COUNTER:
+			elif typeId == self.TYPE_COUNTER:
 				if tokens[0].upper() in ("C", "Z"):
 					value = self.tryParseImmediate_INT(tokens[1])
-			elif self.type == self.TYPE_BLOCK_DB:
+			elif typeId == self.TYPE_BLOCK_DB:
 				if tokens[0].upper() == "DB":
 					value = self.tryParseImmediate_INT(tokens[1])
-			elif self.type == self.TYPE_BLOCK_FB:
+			elif typeId == self.TYPE_BLOCK_FB:
 				if tokens[0].upper() == "FB":
 					value = self.tryParseImmediate_INT(tokens[1])
-			elif self.type == self.TYPE_BLOCK_FC:
+			elif typeId == self.TYPE_BLOCK_FC:
 				if tokens[0].upper() == "FC":
 					value = self.tryParseImmediate_INT(tokens[1])
 		elif len(tokens) == 1:
-			if self.type == self.TYPE_BOOL:
+			if typeId == self.TYPE_BOOL:
 				value = self.tryParseImmediate_BOOL(
 						tokens[0])
-			elif self.type == self.TYPE_BYTE:
+			elif typeId == self.TYPE_BYTE:
 				value = self.tryParseImmediate_HexByte(
 						tokens[0])
-			elif self.type == self.TYPE_WORD:
+			elif typeId == self.TYPE_WORD:
 				value = self.tryParseImmediate_Bin(
 						tokens[0])
 				if value is None:
@@ -249,34 +340,34 @@ class AwlDataType(object):
 				if value is None:
 					value = self.tryParseImmediate_BCD(
 							tokens[0])
-			elif self.type == self.TYPE_DWORD:
+			elif typeId == self.TYPE_DWORD:
 				value = self.tryParseImmediate_Bin(
 						tokens[0])
 				if value is None:
 					value = self.tryParseImmediate_HexDWord(
 							tokens[0])
-			elif self.type == self.TYPE_INT:
+			elif typeId == self.TYPE_INT:
 				value = self.tryParseImmediate_INT(
 						tokens[0])
-			elif self.type == self.TYPE_DINT:
+			elif typeId == self.TYPE_DINT:
 				value = self.tryParseImmediate_DINT(
 						tokens[0])
-			elif self.type == self.TYPE_REAL:
+			elif typeId == self.TYPE_REAL:
 				value = self.tryParseImmediate_REAL(
 						tokens[0])
-			elif self.type == self.TYPE_S5T:
+			elif typeId == self.TYPE_S5T:
 				value = self.tryParseImmediate_S5T(
 						tokens[0])
-			elif self.type == self.TYPE_TIME:
+			elif typeId == self.TYPE_TIME:
 				value = self.tryParseImmediate_TIME(
 						tokens[0])
-			elif self.type == self.TYPE_DATE:
+			elif typeId == self.TYPE_DATE:
 				pass#TODO
-			elif self.type == self.TYPE_DT:
+			elif typeId == self.TYPE_DT:
 				pass#TODO
-			elif self.type == self.TYPE_TOD:
+			elif typeId == self.TYPE_TOD:
 				pass#TODO
-			elif self.type == self.TYPE_CHAR:
+			elif typeId == self.TYPE_CHAR:
 				value = self.tryParseImmediate_CHAR(
 						tokens[0])
 		if value is None:
@@ -374,6 +465,8 @@ class AwlDataType(object):
 
 	@classmethod
 	def __parseGenericTime(cls, token):
+		# Parse T# or S5T# time formats.
+		# The prefix is already stripped.
 		token = token.upper()
 		p = token
 		seconds = 0.0
@@ -406,6 +499,26 @@ class AwlDataType(object):
 			num = int(num, 10)
 			seconds += num * mult
 		return seconds
+
+	@classmethod
+	def formatTime(cls, seconds):
+		# Format a seconds value into time format.
+		d = int(seconds // 86400)
+		seconds -= d * 86400
+		h = int(seconds // 3600)
+		seconds -= h * 3600
+		m = int(seconds // 60)
+		seconds -= m * 60
+		s = int(seconds)
+		seconds -= s
+		ms = int(seconds * 1000.0)
+		ret = []
+		for v, b in ((d, "d"), (h, "h"), (m, "m"), (s, "s"), (ms, "ms")):
+			if v:
+				ret.append("%d%s" % (v, b))
+		if not ret:
+			return "0ms"
+		return "".join(ret)
 
 	@classmethod
 	def __tryParseImmediate_STRING(cls, token, maxLen):

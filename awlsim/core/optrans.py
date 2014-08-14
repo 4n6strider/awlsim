@@ -1,7 +1,7 @@
 #
 # AWL simulator - Operator translator
 #
-# Copyright 2012-2013 Michael Buesch <m@bues.ch>
+# Copyright 2012-2014 Michael Buesch <m@bues.ch>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -326,7 +326,9 @@ class AwlOpTranslator(object):
 					opDesc.operator.value.bitOffset = int(rawOps[0], 10)
 				except ValueError as e:
 					if opDesc.operator.type == AwlOperator.MEM_STW:
-						opDesc.operator.value.bitOffset = S7StatusWord.getBitnrByName(rawOps[0])
+						opDesc.operator.value.bitOffset =\
+							S7StatusWord.getBitnrByName(rawOps[0],
+										    self.mnemonics)
 					else:
 						raise AwlSimError("Invalid bit address")
 			else:
@@ -364,6 +366,25 @@ class AwlOpTranslator(object):
 		else:
 			assert(0)
 
+	# Translate array indices.
+	# The first token is the opening brace '['.
+	# Returns tuple: (list_of_indices, consumed_tokens_count)
+	def __translateArrayIndices(self, tokens):
+		indices = []
+		count = 1
+		try:
+			while tokens[count] != ']':
+				indices.append(int(tokens[count]))
+				count += 1
+				if count < len(tokens) and tokens[count] == ',':
+					count += 1
+			count += 1 # closing braces
+		except (ValueError, IndexError) as e:
+			raise AwlSimError("Invalid array index")
+		if len(indices) < 1 or len(indices) > 6:
+			raise AwlSimError("Invalid number of array indices")
+		return (indices, count)
+
 	def __doTrans(self, rawInsn, rawOps):
 		if rawInsn and rawInsn.block.hasLabel(rawOps[0]):
 			# Label reference
@@ -392,16 +413,27 @@ class AwlOpTranslator(object):
 			return opDesc
 		# Local variable
 		if token0.startswith('#'):
+			offset = AwlOffset(None, None)
+			offset.varName = rawOps[0][1:]
+			count = 1
+			if len(rawOps) >= 4 and rawOps[1] == '[':
+				# This is an array variable
+				offset.indices, cnt = self.__translateArrayIndices(rawOps[1:])
+				count += cnt
 			return OpDescriptor(AwlOperator(AwlOperator.NAMED_LOCAL, 0,
-							rawOps[0][1:]), 1)
+							offset), count)
 		# Pointer to local variable
 		if token0.startswith("P##"):
+			offset = AwlOffset(None, None)
+			offset.varName = rawOps[0][3:]
 			return OpDescriptor(AwlOperator(AwlOperator.NAMED_LOCAL_PTR, 0,
-							rawOps[0][3:]), 1)
+							offset), 1)
 		# Symbolic name
 		if token0.startswith('"') and token0.endswith('"'):
+			offset = AwlOffset(None, None)
+			offset.varName = rawOps[0][1:-1]
 			return OpDescriptor(AwlOperator(AwlOperator.SYMBOLIC, 0,
-							rawOps[0][1:-1]), 1)
+							offset), 1)
 		# Immediate boolean
 		immediate = AwlDataType.tryParseImmediate_BOOL(rawOps[0])
 		if immediate is not None:
@@ -490,7 +522,7 @@ class AwlOpTranslator(object):
 		if immediate is not None:
 			return OpDescriptor(AwlOperator(AwlOperator.IMM, 32,
 					    immediate), 1)
-		# DBx.DB[XBWD] addressing
+		# DBx.DBX/B/W/D addressing
 		match = re.match(r'^DB(\d+)\.DB([XBWD])$', rawOps[0])
 		if match:
 			dbNumber = int(match.group(1))
@@ -500,10 +532,27 @@ class AwlOpTranslator(object):
 				"W"	: 16,
 				"D"	: 32,
 			}[match.group(2)]
-			offset = AwlOffset(-1, -1 if (width == 1) else 0,
-					   dbNumber = dbNumber)
+			offset = AwlOffset(-1, -1 if (width == 1) else 0)
+			offset.dbNumber = dbNumber
 			return OpDescriptor(AwlOperator(AwlOperator.MEM_DB, width,
 					    offset), 2)
+		# DBx.VARIABLE adressing
+		match = re.match(r'^((?:DB\d+)|(?:"[^"]+"))\.(.+)$', rawOps[0])
+		if match:
+			offset = AwlOffset(None, None)
+			db = match.group(1)
+			if db.startswith("DB"):
+				offset.dbNumber = int(db[2:])
+			else:
+				offset.dbName = db[1:-1]
+			offset.varName = match.group(2)
+			count = 1
+			if len(rawOps) >= 4 and rawOps[1] == '[':
+				# DBx.ARRAY[x, y, z] adressing
+				offset.indices, cnt = self.__translateArrayIndices(rawOps[1:])
+				count += cnt
+			return OpDescriptor(AwlOperator(AwlOperator.NAMED_DBVAR, 0,
+					    offset), count)
 		raise AwlSimError("Cannot parse operand: " +\
 				str(rawOps[0]))
 

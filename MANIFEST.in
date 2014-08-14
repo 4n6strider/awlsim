@@ -1,11 +1,15 @@
 include COPYING.txt
 include EXAMPLE.awl
-include EXAMPLE.asc
 include EXAMPLE.awlpro
+include EXAMPLE.csv
 include TODO.txt
+include COMPATIBILITY.txt
+include awlsim-wininst-postinstall.py
+include py2exe-build.bat
 include awlsimhw_linuxcnc/awlsim.hal
 graft tests
 graft fake
+graft doc
 
 prune build
 prune ./build
