@@ -26,15 +26,9 @@ from awlsim.core.operators import AwlOperator
 from awlsim.core.datatypes import AwlOffset
 
 import threading
+import time
+import socket
 import SocketServer
-
-
-class MyTCPHandler(SocketServer.BaseRequestHandler):
-    def handle(self):
-        self.data = self.request.recv(1024).strip()
-        print("{} wrote:".format(self.client_address[0]))
-        print(self.data)
-        self.request.sendall(self.data.upper())
 
 
 class HardwareInterface(AbstractHardwareInterface):
@@ -47,8 +41,23 @@ class HardwareInterface(AbstractHardwareInterface):
     def __init__(self, sim, parameters):
         AbstractHardwareInterface.__init__(self, sim=sim, parameters=parameters)
 
+    class MyTCPHandler(SocketServer.BaseRequestHandler):
+        sim = None
+        ou_address = None
+
+        def handle(self):
+            while True:
+                try:
+                    self.request.sendall(self.sim.cpu.fetchOutputRange(self.ou_address, 512))
+                    time.sleep(0.5)
+                except socket.error:
+                    pass
+
     def doStartup(self):
-        server = SocketServer.TCPServer(('127.0.0.1', 5000), MyTCPHandler)
+        handler = self.MyTCPHandler
+        handler.sim = self.sim
+        handler.ou_address = self.outputAddressBase
+        server = SocketServer.TCPServer(('127.0.0.1', 5000), handler)
         t = threading.Thread(target=server.serve_forever)
         t.daemon = True
         t.start()
